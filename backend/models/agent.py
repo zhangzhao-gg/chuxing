@@ -16,7 +16,7 @@ class AgentCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="Agent 名称")
     system_prompt: str = Field(..., min_length=1, description="系统提示词")
     model: str = Field(
-        default="gpt-4o-mini", description="OpenAI 模型名（如 gpt-4o-mini、gpt-4o）"
+        default="deepseek-chat", description="OpenAI 模型名（如 gpt-4o-mini、gpt-4o）"
     )
 
 

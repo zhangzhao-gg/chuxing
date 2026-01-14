@@ -18,8 +18,7 @@
 ### 1. 环境准备
 
 ```bash
-# 启动 MongoDB
-docker run -d -p 27017:27017 --name mongo mongo:7
+# 保证 mongdb
 
 # 配置环境变量
 cp .env.example .env

@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # === LLM 上下文配置 ===
     MAX_CONTEXT_TOKENS: int = 4096
 
+    # === 上下文压缩配置 ===
+    ENABLE_CONTEXT_COMPRESSION: bool = False  # 是否启用上下文压缩
+    COMPRESSION_THRESHOLD: int = 30  # 触发压缩的消息数阈值
+    COMPRESSION_TARGET: int = 10  # 压缩后保留的消息数
+
     # === 服务器配置 ===
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000

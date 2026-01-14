@@ -5,7 +5,7 @@
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List
 import logging
 from ..services.message import MessageService
@@ -17,15 +17,33 @@ from ..core.exceptions import ResourceNotFoundError, LLMError
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-message_service = MessageService()
-llm_service = LLMService()
-conv_service = ConversationService()
+
+
+def get_message_service() -> MessageService:
+    """依赖注入：获取 MessageService 实例"""
+    return MessageService()
+
+
+def get_llm_service() -> LLMService:
+    """依赖注入：获取 LLMService 实例"""
+    return LLMService()
+
+
+def get_conversation_service() -> ConversationService:
+    """依赖注入：获取 ConversationService 实例"""
+    return ConversationService()
 
 
 @router.post(
     "/conversations/{conv_id}/chat", response_model=MessageResponse, status_code=200
 )
-async def chat(conv_id: str, body: MessageCreate):
+async def chat(
+    conv_id: str,
+    body: MessageCreate,
+    message_service: MessageService = Depends(get_message_service),
+    llm_service: LLMService = Depends(get_llm_service),
+    conv_service: ConversationService = Depends(get_conversation_service),
+):
     """核心对话接口
 
     数据流：
@@ -51,7 +69,9 @@ async def chat(conv_id: str, body: MessageCreate):
         # 4. 更新会话时间戳
         await conv_service.update_conversation_timestamp(conv_id)
 
-        logger.info(f"对话完成: user_msg_id={user_msg.message_id}, assistant_msg_id={assistant_msg.message_id}")
+        logger.info(
+            f"对话完成: user_msg_id={user_msg.message_id}, assistant_msg_id={assistant_msg.message_id}"
+        )
 
         return assistant_msg
 
@@ -71,7 +91,10 @@ async def chat(conv_id: str, body: MessageCreate):
 
 @router.get("/conversations/{conv_id}/messages", response_model=List[MessageResponse])
 async def get_messages(
-    conv_id: str, limit: int = Query(50, ge=1, le=200), skip: int = Query(0, ge=0)
+    conv_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+    message_service: MessageService = Depends(get_message_service),
 ):
     """获取对话历史"""
     return await message_service.get_conversation_messages(

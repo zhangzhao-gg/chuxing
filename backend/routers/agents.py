@@ -5,53 +5,61 @@
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List
 from ..services.agent import AgentService
 from ..models.agent import AgentCreate, AgentResponse
 from ..core.exceptions import ResourceNotFoundError
 
 router = APIRouter()
-agent_service = AgentService()
+
+
+def get_agent_service() -> AgentService:
+    """依赖注入：获取 AgentService 实例"""
+    return AgentService()
 
 
 @router.post("", response_model=AgentResponse, status_code=201)
-async def create_agent(data: AgentCreate):
+async def create_agent(data: AgentCreate, service: AgentService = Depends(get_agent_service)):
     """创建 Agent"""
-    return await agent_service.create_agent(data)
+    return await service.create_agent(data)
 
 
 @router.get("", response_model=List[AgentResponse])
 async def list_agents(
-    limit: int = Query(100, ge=1, le=500), skip: int = Query(0, ge=0)
+    limit: int = Query(100, ge=1, le=500),
+    skip: int = Query(0, ge=0),
+    service: AgentService = Depends(get_agent_service),
 ):
     """列出所有 Agent"""
-    return await agent_service.list_agents(limit=limit, skip=skip)
+    return await service.list_agents(limit=limit, skip=skip)
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
-async def get_agent(agent_id: str):
+async def get_agent(agent_id: str, service: AgentService = Depends(get_agent_service)):
     """获取 Agent 详情"""
-    agent = await agent_service.get_agent(agent_id)
+    agent = await service.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent 不存在: {agent_id}")
     return agent
 
 
 @router.put("/{agent_id}", response_model=AgentResponse)
-async def update_agent(agent_id: str, data: AgentCreate):
+async def update_agent(
+    agent_id: str, data: AgentCreate, service: AgentService = Depends(get_agent_service)
+):
     """更新 Agent 配置"""
     try:
-        return await agent_service.update_agent(agent_id, data)
+        return await service.update_agent(agent_id, data)
     except ResourceNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.delete("/{agent_id}", response_model=dict)
-async def delete_agent(agent_id: str):
+async def delete_agent(agent_id: str, service: AgentService = Depends(get_agent_service)):
     """删除 Agent"""
     try:
-        await agent_service.delete_agent(agent_id)
+        await service.delete_agent(agent_id)
         return {"success": True}
     except ResourceNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

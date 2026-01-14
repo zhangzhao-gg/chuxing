@@ -9,6 +9,7 @@ from typing import List, Dict, Any
 import logging
 from openai import AsyncOpenAI
 from .message import MessageService
+from .context_compression import ContextCompressionService
 from ..repositories.agent import AgentRepository
 from ..repositories.conversation import ConversationRepository
 from ..core.config import settings
@@ -37,6 +38,7 @@ class LLMService:
 
     def __init__(self):
         self.message_service = MessageService()
+        self.compression_service = ContextCompressionService()
         self.agent_repo = AgentRepository()
         self.conv_repo = ConversationRepository()
 
@@ -55,10 +57,11 @@ class LLMService:
         1. 获取 conversation → agent_id
         2. 获取 agent → system_prompt + model
         3. 加载历史消息（最近 50 条）
-        4. 构建上下文 = [system] + history + [user]
-        5. 裁剪上下文（保留 system + 最新 user，删除中间历史）
-        6. 调用 OpenAI API
-        7. 返回 assistant 内容
+        4. 检查是否需要压缩上下文
+        5. 构建上下文 = [system] + (compressed_summary or history) + [user]
+        6. 裁剪上下文（保留 system + 最新 user，删除中间历史）
+        7. 调用 OpenAI API
+        8. 返回 assistant 内容
         """
         # 1. 获取会话信息
         conversation = await self.conv_repo.find_one({"conversation_id": conv_id})
@@ -75,17 +78,24 @@ class LLMService:
             conv_id, limit=50
         )
 
-        # 4. 构建上下文
+        # 4. 检查是否需要压缩上下文
+        history_messages = [{"role": msg.role, "content": msg.content} for msg in history]
+
+        if self.compression_service.should_compress(len(history_messages)):
+            logger.info(f"触发上下文压缩: 当前消息数={len(history_messages)}, 阈值={settings.COMPRESSION_THRESHOLD}")
+            history_messages = await self._compress_context(history_messages)
+
+        # 5. 构建上下文
         messages = self._build_context(
             agent.system_prompt,
-            [{"role": msg.role, "content": msg.content} for msg in history],
+            history_messages,
             user_message,
         )
 
-        # 5. 裁剪上下文
+        # 6. 裁剪上下文
         messages = self._trim_context(messages, self.max_context_tokens)
 
-        # 6. 调用 OpenAI
+        # 7. 调用 OpenAI
         try:
             logger.info(
                 f"调用 OpenAI: model={agent.model}, messages_count={len(messages)}"
@@ -103,6 +113,51 @@ class LLMService:
         except Exception as e:
             logger.error(f"OpenAI 调用失败: {e}")
             raise OpenAIAPIError(f"OpenAI 调用失败: {e}")
+
+    async def _compress_context(
+        self, history_messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """压缩上下文
+
+        策略：
+        1. 保留最近的 COMPRESSION_TARGET 条消息
+        2. 将更早的消息压缩为摘要
+        3. 摘要作为 system 角色的消息插入
+
+        Args:
+            history_messages: 历史消息列表
+
+        Returns:
+            压缩后的消息列表
+        """
+        target_count = settings.COMPRESSION_TARGET
+
+        if len(history_messages) <= target_count:
+            return history_messages
+
+        # 分割消息：需要压缩的 + 保留的
+        messages_to_compress = history_messages[:-target_count]
+        messages_to_keep = history_messages[-target_count:]
+
+        # 调用压缩服务生成摘要
+        summary = await self.compression_service.compress_messages(
+            messages_to_compress, target_count
+        )
+
+        # 构建压缩后的上下文
+        compressed_context = [
+            {
+                "role": "system",
+                "content": f"[历史对话摘要]\n{summary}\n[以下是最近的对话]"
+            }
+        ]
+        compressed_context.extend(messages_to_keep)
+
+        logger.info(
+            f"上下文压缩完成: {len(history_messages)} 条 → 摘要 + {len(messages_to_keep)} 条"
+        )
+
+        return compressed_context
 
     def _build_context(
         self, system_prompt: str, history: List[Dict[str, Any]], user_msg: str
