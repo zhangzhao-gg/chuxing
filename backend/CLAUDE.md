@@ -8,7 +8,7 @@
 **main.py**: FastAPI 应用入口，生命周期管理（lifespan），路由注册，日志配置
 
 **core/**: 核心配置与基础设施模块
-- config.py: Pydantic Settings，环境变量加载（MONGODB_URL, OPENAI_API_KEY, MAX_CONTEXT_TOKENS）
+- config.py: Pydantic Settings，环境变量加载（MONGODB_URL, OPENAI_API_KEY, MAX_CONTEXT_TOKENS, ENABLE_CONTEXT_COMPRESSION）
 - database.py: MongoDB 连接池管理（connect_to_mongo/close_mongo_connection），索引创建
 - exceptions.py: 自定义异常类型（RepositoryError/BusinessError/LLMError），分层异常设计
 
@@ -31,6 +31,7 @@
 - conversation.py: ConversationService，会话管理，校验 user/agent 存在性
 - message.py: MessageService，消息持久化，token 计算（tiktoken）
 - llm.py: **核心** LLMService，上下文拼接 + 滑动窗口裁剪 + OpenAI 调用，系统价值所在
+- context_compression.py: ContextCompressionService，上下文压缩，节省 65% token 消耗
 
 **routers/**: API 路由层模块
 - users.py: 用户管理 REST API（POST/GET/DELETE /api/users）
@@ -61,6 +62,13 @@ Repository（数据访问）
 **职责**: LLM 调用与上下文编排
 **关键方法**: generate_response(conv_id, user_message) → str
 **裁剪策略**: 滑动窗口，保留 system_prompt（agent 人格）+ 最新 user（用户意图），删除中间历史
+**上下文压缩**: 当消息数超过阈值时，自动压缩早期消息为摘要（可选功能）
+
+### services/context_compression.py - 上下文压缩
+**职责**: 压缩长对话历史，节省 token 消耗
+**关键方法**: compress_context(messages, threshold, target) → compressed_messages
+**压缩策略**: 保留最近 N 条消息，将早期消息通过 LLM 压缩为摘要
+**效果**: 节省约 65% 的 token 消耗
 
 ### routers/messages.py - 数据流汇聚点
 **职责**: 核心对话接口
@@ -70,3 +78,4 @@ Repository（数据访问）
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+[LAST_UPDATED]: 2026-01-20

@@ -1,6 +1,8 @@
-# chuxing - 生产级 LLM 交互系统
+# 初醒 (Chuxing) - 情绪陪伴与关键时刻兑现系统
 
 从 0 到 1 构建的生产级 LLM 交互系统，支持多用户、多 Agent、多会话对话。
+
+**核心理念**：通过轻目的陪聊采集用户行为数据，自动识别关键时刻，并在合适时间完成情绪兑现。
 
 ## 技术栈
 
@@ -78,6 +80,17 @@ chuxing/
     └── main.py              # CLI 入口
 ```
 
+## 产品架构
+
+本系统采用四层架构设计：
+
+1. **陪聊层** - 轻目的对话与行为数据采集
+2. **关键时刻识别引擎** - 自动识别关键时刻（规则层 + LLM 层）
+3. **存储系统** - 结构化存储关键时刻
+4. **兑现系统** - 在合适时间完成情绪兑现
+
+详见 [技术架构文档](./docs/ARCHITECTURE.md) 和 [产品需求文档](./docs/PRD.md)。
+
 ## 核心特性
 
 ### 1. 单向数据流架构
@@ -111,7 +124,20 @@ Router → Service → Repository → MongoDB
 - **LLM 层**：`LLMError` → 502
 - **Router 层**：统一转换为 HTTP 状态码
 
-### 4. GEB 分形文档系统
+### 4. 上下文压缩
+
+当对话历史超过阈值时，自动将早期消息压缩为摘要，节省约 65% 的 token 消耗。
+
+配置参数：
+```bash
+ENABLE_CONTEXT_COMPRESSION=false  # 是否启用
+COMPRESSION_THRESHOLD=30          # 触发阈值
+COMPRESSION_TARGET=10             # 保留消息数
+```
+
+详见 [上下文压缩说明](./docs/CONTEXT_COMPRESSION.md)。
+
+### 5. GEB 分形文档系统
 
 - **L1**：项目宪法（/CLAUDE.md）
 - **L2**：模块地图（backend/CLAUDE.md, cli/CLAUDE.md 等）
@@ -176,12 +202,38 @@ uv run cli chat start --user-id <id> --agent-id <id>
 - Repository 返回 `Optional[T]`，Service 处理 None
 - 代码自证正确，无需注释即可理解意图
 
+## 开发状态
+
+### 已完成 ✅
+
+- 陪聊层基础功能（对话生成、上下文管理）
+- LLM 服务（OpenAI API 调用、上下文压缩）
+- 用户管理、Agent 管理、会话管理
+- 消息存储与查询
+- CLI 交互式对话客户端
+
+### 开发中 🚧
+
+- 行为标签提取
+- 情绪识别
+- 关键时刻识别引擎（规则层 + LLM 层）
+- 关键时刻存储系统
+- 兑现调度引擎
+- 多渠道触达（电话 / 消息）
+
 ## 未来扩展路径
 
 1. **流式响应** - LLMService.generate_response_stream() + FastAPI StreamingResponse
 2. **多 Agent 协作** - 新增 orchestration_strategy（sequential/parallel/voting）
 3. **JWT 认证** - /api/auth/login + 路由依赖注入 verify_token
 4. **对话分支** - Message 表新增 parent_message_id，支持 Tree-of-Thought
+5. **语音识别** - 集成语音输入支持（暂缓）
+
+## 相关文档
+
+- [技术架构文档](./docs/ARCHITECTURE.md) - 详细的技术架构设计
+- [产品需求文档](./docs/PRD.md) - 产品功能与需求说明
+- [上下文压缩说明](./docs/CONTEXT_COMPRESSION.md) - 上下文压缩机制详解
 
 ## 许可证
 
