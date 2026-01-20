@@ -47,3 +47,4 @@
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+[LAST_UPDATED]: 2026-01-20
