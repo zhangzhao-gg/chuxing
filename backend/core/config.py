@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     MONGODB_URL: str = "mongodb://localhost:27017"
     MONGODB_DB_NAME: str = "llm_chat"
 
+    # === PostgreSQL 配置 ===
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 55432
+    POSTGRES_USER: str = "postgres"
+    POSTGRES_PASSWORD: str = "postgres"
+    POSTGRES_DB_NAME: str = "llm_chat"
+
     # === OpenAI 配置 ===
     OPENAI_API_KEY: str
     OPENAI_BASE_URL: Optional[str] = None

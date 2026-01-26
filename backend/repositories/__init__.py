@@ -9,6 +9,7 @@ from .user import UserRepository
 from .agent import AgentRepository
 from .conversation import ConversationRepository
 from .message import MessageRepository
+from .moment import MomentRepository
 
 __all__ = [
     "BaseRepository",
@@ -16,4 +17,5 @@ __all__ = [
     "AgentRepository",
     "ConversationRepository",
     "MessageRepository",
+    "MomentRepository",
 ]

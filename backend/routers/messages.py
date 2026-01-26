@@ -11,6 +11,7 @@ import logging
 from ..services.message import MessageService
 from ..services.llm import LLMService
 from ..services.conversation import ConversationService
+from ..services.moment import MomentService
 from ..models.message import MessageCreate, MessageResponse
 from ..core.exceptions import ResourceNotFoundError, LLMError
 
@@ -34,6 +35,11 @@ def get_conversation_service() -> ConversationService:
     return ConversationService()
 
 
+def get_moment_service() -> MomentService:
+    """依赖注入：获取 MomentService 实例"""
+    return MomentService()
+
+
 @router.post(
     "/conversations/{conv_id}/chat", response_model=MessageResponse, status_code=200
 )
@@ -48,18 +54,20 @@ async def chat(
 
     数据流：
     1. 保存 user message
-    2. 调用 LLMService 生成回复
+    2. 调用 LLMService 生成回复（同时进行情绪识别和关键时刻判断）
     3. 保存 assistant message
     4. 更新会话时间戳
-    5. 返回 assistant 回复
+    5. 如果识别到关键时刻，创建关键时刻记录
+    6. 返回 assistant 回复
     """
     try:
         # 1. 保存用户消息
         logger.info(f"收到用户消息: conv_id={conv_id}, length={len(body.content)}")
         user_msg = await message_service.create_message(conv_id, "user", body.content)
 
-        # 2. 调用 LLM 生成回复
-        assistant_content = await llm_service.generate_response(conv_id, body.content)
+        # 2. 调用 LLM 生成回复（同时进行情绪识别和关键时刻判断）
+        llm_response = await llm_service.generate_response(conv_id, body.content)
+        assistant_content = llm_response["chat_response"]
 
         # 3. 保存助手消息
         assistant_msg = await message_service.create_message(
@@ -69,8 +77,38 @@ async def chat(
         # 4. 更新会话时间戳
         await conv_service.update_conversation_timestamp(conv_id)
 
+        # 5. 如果识别到关键时刻，创建关键时刻记录
+        if llm_response.get("moment"):
+            try:
+                # 获取会话信息以获取user_id
+                conversation = await conv_service.get_conversation(conv_id)
+                if conversation:
+                    # 获取最近10轮对话上下文
+                    recent_messages = await message_service.get_conversation_messages(
+                        conv_id, limit=10
+                    )
+                    context_messages = [
+                        {"role": msg.role, "content": msg.content}
+                        for msg in recent_messages
+                    ]
+
+                    moment_service = MomentService()
+                    moment = await moment_service.create_moment_from_llm_response(
+                        conv_id,
+                        conversation.user_id,
+                        llm_response["moment"],
+                        context_messages,
+                    )
+                    if moment:
+                        logger.info(
+                            f"创建关键时刻: moment_id={moment.moment_id}, event_time={moment.event_time}"
+                        )
+            except Exception as e:
+                # 关键时刻创建失败不影响对话流程
+                logger.warning(f"关键时刻创建失败: {e}", exc_info=True)
+
         logger.info(
-            f"对话完成: user_msg_id={user_msg.message_id}, assistant_msg_id={assistant_msg.message_id}"
+            f"对话完成: user_msg_id={user_msg.message_id}, assistant_msg_id={assistant_msg.message_id}, emotion_level={llm_response.get('emotion_level', 0)}"
         )
 
         return assistant_msg

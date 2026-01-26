@@ -5,8 +5,10 @@
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
+import json
+import re
 from openai import AsyncOpenAI
 from .message import MessageService
 from .context_compression import ContextCompressionService
@@ -50,8 +52,10 @@ class LLMService:
         self.openai_client = AsyncOpenAI(**openai_params)
         self.max_context_tokens = settings.MAX_CONTEXT_TOKENS
 
-    async def generate_response(self, conv_id: str, user_message: str) -> str:
-        """核心方法：生成 LLM 回复
+    async def generate_response(
+        self, conv_id: str, user_message: str
+    ) -> Dict[str, Any]:
+        """核心方法：生成 LLM 回复，同时进行情绪识别和关键时刻判断
 
         流程：
         1. 获取 conversation → agent_id
@@ -60,8 +64,16 @@ class LLMService:
         4. 检查是否需要压缩上下文
         5. 构建上下文 = [system] + (compressed_summary or history) + [user]
         6. 裁剪上下文（保留 system + 最新 user，删除中间历史）
-        7. 调用 OpenAI API
-        8. 返回 assistant 内容
+        7. 调用 OpenAI API（要求返回JSON格式，包含对话回复、情绪、关键时刻）
+        8. 解析返回的JSON，提取对话回复、情绪信息、关键时刻信息
+
+        Returns:
+            {
+                "chat_response": str,  # 对话回复
+                "emotion_tags": List[str],  # 情绪标签
+                "emotion_level": int,  # 情绪强度 0-5
+                "moment": Optional[Dict],  # 关键时刻信息（如果有）
+            }
         """
         # 1. 获取会话信息
         conversation = await self.conv_repo.find_one({"conversation_id": conv_id})
@@ -85,9 +97,10 @@ class LLMService:
             logger.info(f"触发上下文压缩: 当前消息数={len(history_messages)}, 阈值={settings.COMPRESSION_THRESHOLD}")
             history_messages = await self._compress_context(history_messages)
 
-        # 5. 构建上下文
+        # 5. 构建上下文（增强system prompt，要求返回结构化信息）
+        enhanced_system_prompt = self._build_enhanced_system_prompt(agent.system_prompt)
         messages = self._build_context(
-            agent.system_prompt,
+            enhanced_system_prompt,
             history_messages,
             user_message,
         )
@@ -95,24 +108,102 @@ class LLMService:
         # 6. 裁剪上下文
         messages = self._trim_context(messages, self.max_context_tokens)
 
-        # 7. 调用 OpenAI
+        # 7. 调用 OpenAI（要求返回JSON格式）
         try:
             logger.info(
                 f"调用 OpenAI: model={agent.model}, messages_count={len(messages)}"
             )
-            response = await self.openai_client.chat.completions.create(
-                model=agent.model,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=1024,
-            )
-            assistant_content = response.choices[0].message.content
-            logger.info(f"OpenAI 响应成功: length={len(assistant_content)}")
-            return assistant_content
+            
+            # 检查模型是否支持json_object格式（GPT-4o-mini和GPT-4o支持）
+            create_params = {
+                "model": agent.model,
+                "messages": messages,
+                "temperature": 0.7,
+                "max_tokens": 2048,  # 增加token限制，因为需要返回更多信息
+            }
+            
+            # 如果模型支持，使用json_object格式
+            if "gpt-4o" in agent.model or "gpt-4" in agent.model:
+                create_params["response_format"] = {"type": "json_object"}
+            
+            response = await self.openai_client.chat.completions.create(**create_params)
+            response_content = response.choices[0].message.content
+            logger.info(f"OpenAI 响应成功: length={len(response_content)}")
+
+            # 8. 解析JSON响应
+            return self._parse_llm_response(response_content)
 
         except Exception as e:
             logger.error(f"OpenAI 调用失败: {e}")
             raise OpenAIAPIError(f"OpenAI 调用失败: {e}")
+
+    def _build_enhanced_system_prompt(self, original_prompt: str) -> str:
+        """增强系统提示词，要求LLM返回结构化信息"""
+        return f"""{original_prompt}
+
+重要：请以JSON格式返回你的回复，必须包含以下字段：
+1. chat_response: 你的对话回复（自然、有温度的文本）
+2. emotion_tags: 用户当前的情绪标签列表（如：["nervous", "anxious"] 或 ["happy", "excited"]）
+3. emotion_level: 情绪强度（0-5的整数，0=无情绪，5=强烈情绪）
+4. moment: 关键时刻信息（如果用户提到了未来事件、重要情绪或习惯，则填写此字段；否则为null）
+
+moment字段格式（如果存在）：
+{{
+    "is_moment": true,
+    "type": "event/habit/emotion",
+    "time": "自然语言时间描述（如：明天早上8点）",
+    "event_description": "事件描述",
+    "emotion": "情绪标签",
+    "emotion_level": 0-5或null,
+    "importance": "low/mid/high",
+    "suggested_action": "call/message",
+    "suggested_timing": "before_event/after_event/on_time",
+    "ai_attitude": "AI的态度（鼓励/安慰/祝贺等）",
+    "first_message": "触达时的第一句话（50字以内）",
+    "reason": "判断理由"
+}}
+
+请严格按照JSON格式返回，不要包含任何markdown代码块标记。"""
+
+    def _parse_llm_response(self, response_content: str) -> Dict[str, Any]:
+        """解析LLM返回的JSON响应"""
+        try:
+            # 尝试提取JSON（可能包含markdown代码块）
+            json_match = re.search(r"\{[\s\S]*\}", response_content)
+            if json_match:
+                result = json.loads(json_match.group())
+            else:
+                result = json.loads(response_content)
+
+            # 确保必需字段存在
+            chat_response = result.get("chat_response", "")
+            emotion_tags = result.get("emotion_tags", [])
+            emotion_level = result.get("emotion_level", 0)
+            moment = result.get("moment")
+
+            # 验证moment字段格式
+            if moment and moment.get("is_moment"):
+                # moment字段存在且is_moment为true
+                pass
+            else:
+                moment = None
+
+            return {
+                "chat_response": chat_response,
+                "emotion_tags": emotion_tags if isinstance(emotion_tags, list) else [],
+                "emotion_level": emotion_level if isinstance(emotion_level, int) else 0,
+                "moment": moment,
+            }
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"LLM返回JSON解析失败: {e}, 内容: {response_content[:200]}")
+            # 如果解析失败，尝试提取纯文本作为对话回复
+            return {
+                "chat_response": response_content,
+                "emotion_tags": [],
+                "emotion_level": 0,
+                "moment": None,
+            }
 
     async def _compress_context(
         self, history_messages: List[Dict[str, Any]]
