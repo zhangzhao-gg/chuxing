@@ -87,7 +87,7 @@ async def create_pg_schema() -> None:
                 first_message TEXT NULL,
                 ai_attitude TEXT NULL,
                 reason TEXT NULL,
-                status TEXT NOT NULL,
+                status SMALLINT NOT NULL,
                 confirmed BOOLEAN NOT NULL DEFAULT FALSE,
                 executed_at TIMESTAMPTZ NULL,
                 context_messages JSONB NULL
@@ -97,6 +97,37 @@ async def create_pg_schema() -> None:
 
         await conn.execute("ALTER TABLE moments ADD COLUMN IF NOT EXISTS suggested_timing TEXT NULL;")
         await conn.execute("ALTER TABLE moments ADD COLUMN IF NOT EXISTS reason TEXT NULL;")
+
+        # status 迁移：TEXT -> SMALLINT（pending=1 scheduled=1 completed=2 cancelled=3）
+        # 备注：pending 与 scheduled 同为 1，通过 confirmed(false/true) 区分。
+        await conn.execute(
+            """
+            DO $$
+            DECLARE
+                col_type TEXT;
+            BEGIN
+                SELECT data_type INTO col_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'moments'
+                  AND column_name = 'status';
+
+                IF col_type IN ('text', 'character varying') THEN
+                    ALTER TABLE moments
+                    ALTER COLUMN status TYPE SMALLINT
+                    USING (
+                        CASE status
+                            WHEN 'pending' THEN 1
+                            WHEN 'scheduled' THEN 1
+                            WHEN 'completed' THEN 2
+                            WHEN 'cancelled' THEN 3
+                            ELSE 1
+                        END
+                    );
+                END IF;
+            END $$;
+            """
+        )
 
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_moments_user_event "

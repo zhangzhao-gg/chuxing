@@ -3,7 +3,7 @@
 
 **文档版本**: v1.1
 **创建日期**: 2026-01-14
-**更新日期**: 2026-01-20
+**更新日期**: 2026-02-03
 **负责人**: 张钊
 **状态**: 开发中
 
@@ -45,8 +45,8 @@
 ```
 用户对话
   → 陪聊层(生成回复 + 提取行为/情绪标签)
-  → 关键时刻识别(LLM判断)
-  → 结构化存储(Moment记录)
+  → 关键时刻识别(LLM判断，返回结构化JSON)
+  → 结构化存储(Moment记录，PostgreSQL moments 表)
   → 调度引擎(定时轮询)
   → 触达用户(消息/电话)
 ```
@@ -73,9 +73,7 @@
 **输入**:
 ```json
 {
-  "user_id": "uuid",
-  "conversation_id": "uuid",
-  "message": "明天早上8点有个重要会议，好紧张啊"
+  "content": "明天早上8点有个重要会议，好紧张啊"
 }
 ```
 
@@ -93,9 +91,9 @@
 
 #### 3.1.4 技术实现
 
-- **对话生成**: 使用 LLM (DeepSeek/GPT) 生成自然回复
-- **标签提取**: 通过 Prompt Engineering 让 LLM 同时输出标签
-- **情绪识别**: 基于情绪词典 + LLM 判断，输出 0-5 级情绪强度
+- **对话生成**: 使用 OpenAI Chat Completions 生成自然回复
+- **结构化输出**: 通过 Prompt 约束 LLM 以 JSON 返回（对话回复 + 情绪 + moment）
+- **情绪识别**: 当前由 LLM 直接返回 emotion_tags + emotion_level（0-5）；暂未持久化，仅用于日志与 moment 创建辅助
 
 #### 3.1.5 Prompt 设计
 
@@ -126,33 +124,33 @@
 
 ```json
 {
-  "recent_messages": [最近10轮对话],
-  "user_profile": {用户画像},//TODO
-  "existing_moments": [已记录的关键时刻]//TODO
+  "recent_messages": [最近50条历史消息（必要时先压缩）],
+  "system_prompt": "Agent人格设定（增强版：要求JSON输出）",
+  "user_message": "本轮用户输入"
 }
 ```
-
-**TODO：根据用户画像来回复消息**
-
-**TODO：根据已经记录的关键时刻实现去重**
-
-
 
 **输出**:
 
 ```json
 {
-  "is_moment": true,
-  "type": "event",  // event / habit / emotion
-  "time": "2026-01-15 08:00:00",
-  "event_description": "重要工作会议",//事件描述
-  "emotion": "nervous",//情绪标签
-  "importance": "high",  // low / mid / high
-  "suggested_action": "call",  // call / message
-  "suggested_timing": "before_event",  // before_event / after_event / on_time
-  "ai_attitude": "AI的态度（鼓励/安慰/祝贺等）",
-  "reason": "用户表达了对明天会议的紧张情绪，这是一个值得关心的关键时刻",//AI判断理由
-  "first_message": "明天早上的会议快到了，准备好了吗？相信你一定可以的！"
+  "chat_response": "听起来你最近挺辛苦的，要不要聊聊压力来源？",
+  "emotion_tags": ["nervous"],
+  "emotion_level": 4,
+  "moment": {
+    "is_moment": true,
+    "type": "event",  // event / habit / emotion
+    "time": "明天早上8点",
+    "event_description": "重要工作会议",
+    "emotion": "nervous",
+    "emotion_level": 4,
+    "importance": "high",  // low / mid / high
+    "suggested_action": "call",  // call / message
+    "suggested_timing": "before_event",  // before_event / after_event / on_time
+    "ai_attitude": "鼓励",
+    "first_message": "明天早上的会议快到了，准备好了吗？相信你一定可以的！",
+    "reason": "用户表达了对明天会议的紧张情绪，这是一个值得关心的关键时刻"
+  }
 }
 ```
 
@@ -247,15 +245,15 @@ INDEX idx_user_event_time ON moments(user_id, event_time, type)
 #### 3.3.3 状态流转
 
 ```
-pending (待确认)
+pending (待确认) -- 0
   ↓
-scheduled (已调度)
+scheduled (已调度) -- 1
   ↓
-completed (已完成)
+completed (已完成) -- 2
 
 或
 
-cancelled (已取消)
+cancelled (已取消) -- 3
 ```
 
 ---
@@ -289,7 +287,8 @@ def schedule_task():
     # 1. 查询即将到期的 Moment
     moments = query_pending_moments(
         remind_time <= now + 5分钟,
-        status = 'scheduled'
+        status = 1,          # pending/scheduled 编码统一
+        confirmed = true     # confirmed=true 才表示 scheduled
     )
 
     # 2. 生成触达内容
@@ -303,7 +302,7 @@ def schedule_task():
             send_message(moment.user_id, content)
 
         # 4. 更新状态
-        update_moment_status(moment.id, 'completed')
+    update_moment_status(moment.id, 2)  # completed=2
 ```
 
 #### 3.4.3 触达内容生成
@@ -360,7 +359,7 @@ AI态度：{ai_attitude}
 **后端**:
 - ✅ FastAPI (Python 3.10+) - 异步 Web 框架
 - ✅ MongoDB + motor - 对话存储（异步驱动）
-- ⏳ PostgreSQL - 关键时刻存储（待实现）
+- ✅ PostgreSQL + asyncpg - 关键时刻存储（已实现：moments 表幂等创建 + CRUD）
 - ⏳ Redis - 缓存 + 任务队列（待实现）
 - ⏳ Celery - 定时任务（待实现）
 
@@ -369,7 +368,7 @@ AI态度：{ai_attitude}
 - ✅ Token 计算: tiktoken
 - ✅ 上下文管理: 滑动窗口裁剪 + 上下文压缩
 - ⏳ NLP: 情绪识别、实体提取（待实现）
-- ⏳ 时间解析: dateparser（待实现）
+- ✅ 时间解析: dateparser（已实现：自然语言 → datetime，失败则降级规则匹配）
 
 **基础设施**:
 - ✅ Docker - 容器化
@@ -382,23 +381,27 @@ AI态度：{ai_attitude}
 #### 4.2.1 陪聊接口
 
 ```http
-POST /api/chat
+POST /api/conversations/{conv_id}/chat
 Content-Type: application/json
 
 {
-  "user_id": "uuid",
-  "conversation_id": "uuid",
-  "message": "明天早上8点有个重要会议"
+  "content": "明天早上8点有个重要会议"
 }
 
 Response:
 {
-  "chat_response": "...",
-  "behavior_tags": ["meeting"],
-  "emotion_tags": ["nervous"],
-  "emotion_level": 4,
-  "potential_moment": true
+  "message_id": "msg_123",
+  "conversation_id": "conv_456",
+  "role": "assistant",
+  "content": "...",
+  "token_count": 42,
+  "created_at": "2026-01-26T10:00:00Z"
 }
+```
+
+```http
+# 获取对话历史
+GET /api/conversations/{conv_id}/messages?limit=50&skip=0
 ```
 
 #### 4.2.2 关键时刻管理
@@ -444,12 +447,7 @@ POST /api/moments
   conversation_id: "uuid",
   role: "user/assistant",
   content: "...",
-  metadata: {
-    behavior_tags: ["meeting"],
-    emotion_tags: ["nervous"],
-    emotion_level: 4,
-    potential_moment: true
-  },
+  token_count: 42,
   created_at: ISODate
 }
 ```
@@ -458,15 +456,15 @@ POST /api/moments
 
 ```sql
 CREATE TABLE moments (
-    moment_id UUID PRIMARY KEY,
-    user_id UUID NOT NULL,
-    conversation_id UUID,
+    moment_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    conversation_id TEXT NULL,
 
     -- 时间
-    event_time TIMESTAMP NOT NULL,
-    remind_time TIMESTAMP NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW(),
+    event_time TIMESTAMPTZ NOT NULL,
+    remind_time TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
 
     -- 事件
     type VARCHAR(20) NOT NULL,  -- event/habit/emotion
@@ -477,19 +475,18 @@ CREATE TABLE moments (
 
     -- 兑现
     suggested_action VARCHAR(20) CHECK (suggested_action IN ('call', 'message')),
-    first_message TEXT,
-    ai_attitude VARCHAR(50),
+    suggested_timing VARCHAR(20),
+    first_message TEXT, -- 当AI给用户兑现时，说的第一句话
+    ai_attitude VARCHAR(50), -- 态度标签（如「鼓励」「安慰」「祝贺」）。
+    reason TEXT,
 
     -- 状态
-    status VARCHAR(20) DEFAULT 'pending',
+    status SMALLINT DEFAULT 1, -- pending=1 scheduled=1 completed=2 cancelled=3（pending/scheduled 通过 confirmed 区分）
     confirmed BOOLEAN DEFAULT FALSE,
     executed_at TIMESTAMP,
 
     -- 上下文
     context_messages JSONB,
-
-    INDEX idx_user_time (user_id, event_time),
-    INDEX idx_remind_status (remind_time, status)
 );
 ```
 
@@ -555,25 +552,26 @@ def calculate_similarity(moment1: Moment, moment2: Moment) -> float:
 
 **待实现**:
 - ⏳ 行为标签提取
-- ⏳ 情绪识别
-- ⏳ 关键时刻识别
+- ✅ 情绪识别（LLM返回 emotion_tags/emotion_level；暂未持久化）
+- ✅ 关键时刻识别（LLM返回 moment + 服务层去重/时间解析/入库）
 - ⏳ 兑现调度
 - ⏳ 语音识别（暂缓）
 
 #### **Phase 2: 关键时刻识别 (开发中 🚧)**
 
 **功能范围**:
-- ⏳ 规则层实现（关键词匹配）
-- ⏳ LLM层实现（深度分析）
-- ⏳ 关键时刻存储（Moment 数据模型）
-- ⏳ 去重逻辑
-- ⏳ 时间解析（自然语言 → datetime）
+- ⏳ 规则层实现（关键词匹配，作为LLM失败/降级兜底）
+- ✅ LLM层实现（深度分析：返回 JSON 结构化结果）
+- ✅ 关键时刻存储（PostgreSQL moments + asyncpg）
+- ✅ 去重逻辑（时间窗口 ±2小时 + 描述相似度>0.8，命中则更新）
+- ✅ 时间解析（dateparser + 简单中文关键词兜底）
 
 **验收标准**:
 - 能准确识别80%的明确事件（如"明天8点开会"）
 - 误报率<10%
 
 **当前状态**: 待开发
+**当前状态**: 已有端到端闭环（识别→去重→入库→确认/取消接口）；规则层兜底与“调度执行”仍未完成
 
 #### **Phase 3: 兑现调度 (待开发 ⏳)**
 
@@ -607,8 +605,8 @@ def calculate_similarity(moment1: Moment, moment2: Moment) -> float:
 | P1 | 行为标签提取 | ⏳ 待开发 | Prompt Engineering |
 | P1 | 情绪识别 | ⏳ 待开发 | 情绪词典 + LLM |
 | P1 | 规则层识别 | ⏳ 待开发 | 关键词匹配 |
-| P1 | LLM层识别 | ⏳ 待开发 | 深度语义分析 |
-| P1 | 关键时刻存储 | ⏳ 待开发 | Moment 数据模型 |
+| P1 | LLM层识别 | ✅ 已完成 | 深度语义分析（结构化JSON输出） |
+| P1 | 关键时刻存储 | ✅ 已完成 | PostgreSQL moments + asyncpg |
 | P2 | 调度引擎 | ⏳ 待开发 | Celery / APScheduler |
 | P2 | 消息触达 | ⏳ 待开发 | 推送 / 短信 |
 | P3 | 电话触达 | ⏳ 待开发 | AI 语音通话 |

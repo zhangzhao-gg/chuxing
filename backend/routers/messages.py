@@ -8,6 +8,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List
 import logging
+import json
 from ..services.message import MessageService
 from ..services.llm import LLMService
 from ..services.conversation import ConversationService
@@ -68,6 +69,7 @@ async def chat(
         # 2. 调用 LLM 生成回复（同时进行情绪识别和关键时刻判断）
         llm_response = await llm_service.generate_response(conv_id, body.content)
         assistant_content = llm_response["chat_response"]
+        moment_data = llm_response.get("moment")
 
         # 3. 保存助手消息
         assistant_msg = await message_service.create_message(
@@ -78,7 +80,7 @@ async def chat(
         await conv_service.update_conversation_timestamp(conv_id)
 
         # 5. 如果识别到关键时刻，创建关键时刻记录
-        if llm_response.get("moment"):
+        if moment_data:
             try:
                 # 获取会话信息以获取user_id
                 conversation = await conv_service.get_conversation(conv_id)
@@ -92,11 +94,22 @@ async def chat(
                         for msg in recent_messages
                     ]
 
+                    # 用户收到 AI 消息时，打印 AI 的关键信息（用于调试/观测）
+                    # - reason/event_description 来自 LLM 的 moment 字段
+                    # - context_messages 来自当前会话最近10轮消息（与入库 moment 一致）
+                    logger.info(
+                        "AI moment context: conv_id=%s event_description=%s reason=%s context_messages=%s",
+                        conv_id,
+                        moment_data.get("event_description"),
+                        moment_data.get("reason"),
+                        json.dumps(context_messages, ensure_ascii=False)[:2000],
+                    )
+
                     moment_service = MomentService()
                     moment = await moment_service.create_moment_from_llm_response(
                         conv_id,
                         conversation.user_id,
-                        llm_response["moment"],
+                        moment_data,
                         context_messages,
                     )
                     if moment:
@@ -106,6 +119,15 @@ async def chat(
             except Exception as e:
                 # 关键时刻创建失败不影响对话流程
                 logger.warning(f"关键时刻创建失败: {e}", exc_info=True)
+        else:
+            # 没有识别到 moment 时，也输出同样字段，便于统一检索日志
+            logger.info(
+                "AI moment context: conv_id=%s event_description=%s reason=%s context_messages=%s",
+                conv_id,
+                None,
+                None,
+                None,
+            )
 
         logger.info(
             f"对话完成: user_msg_id={user_msg.message_id}, assistant_msg_id={assistant_msg.message_id}, emotion_level={llm_response.get('emotion_level', 0)}"

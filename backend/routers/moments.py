@@ -33,7 +33,10 @@ async def create_moment(
 @router.get("", response_model=List[MomentResponse])
 async def list_moments(
     user_id: str = Query(..., description="用户 ID"),
-    status: Optional[str] = Query(None, description="状态过滤（pending/scheduled/completed/cancelled）"),
+    status: Optional[str] = Query(
+        None,
+        description="状态过滤（pending/scheduled/completed/cancelled；或 1/2/3 编码）",
+    ),
     limit: int = Query(100, ge=1, le=500),
     skip: int = Query(0, ge=0),
     service: MomentService = Depends(get_moment_service),
@@ -57,7 +60,7 @@ async def get_moment(
 async def confirm_moment(
     moment_id: str, service: MomentService = Depends(get_moment_service)
 ):
-    """确认关键时刻（将其状态改为scheduled）"""
+    """确认关键时刻（confirmed=true；status=1，表示 scheduled/pending 编码统一）"""
     try:
         return await service.confirm_moment(moment_id)
     except ResourceNotFoundError as e:

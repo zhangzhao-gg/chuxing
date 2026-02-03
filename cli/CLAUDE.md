@@ -3,6 +3,12 @@
 
 ---
 
+## AGENTS 索引（统一入口）
+
+- [agents.md](../agents.md) - Agent 协作约束与角色清单
+
+---
+
 ## 成员清单
 
 **main.py**: CLI 应用入口，typer.Typer 实例，注册子命令（user/agent/chat），pyproject.toml 的 [project.scripts] 引用
@@ -47,4 +53,4 @@
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
-[LAST_UPDATED]: 2026-01-20
+[LAST_UPDATED]: 2026-02-03

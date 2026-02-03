@@ -84,7 +84,7 @@ class MomentService:
                     )
                     # 更新现有关键时刻
                     return await self._update_existing_moment(
-                        existing_moment, moment_data, context_messages
+                        existing_moment, event_time, moment_data, context_messages
                     )
 
         # 3. 创建新的关键时刻
@@ -187,7 +187,7 @@ class MomentService:
             "first_message": moment_data.get("first_message"),
             "ai_attitude": moment_data.get("ai_attitude"),
             "reason": moment_data.get("reason"),
-            "status": "pending",
+            "status": 1,
             "confirmed": False,
             "executed_at": None,
             "context_messages": context_messages,
@@ -224,19 +224,39 @@ class MomentService:
     async def _update_existing_moment(
         self,
         existing_moment: MomentInDB,
+        event_time: datetime,
         moment_data: Dict[str, Any],
         context_messages: List[Dict[str, str]],
     ) -> MomentResponse:
         """更新现有的关键时刻"""
+        # 当同一个关键时刻发生变化时：同步更新关键字段，避免“数据漂移”
+        # - status 编码：pending=1 scheduled=1 completed=2 cancelled=3
+        # - pending vs scheduled 通过 confirmed 字段区分，所以这里不主动覆盖 confirmed/status
+        updated_type = moment_data.get("type") or existing_moment.type
+        updated_importance = moment_data.get("importance") or existing_moment.importance
+        updated_remind_time = self._calculate_remind_time(
+            event_time, updated_importance, updated_type
+        )
+
         update_doc = {
             "updated_at": datetime.utcnow(),
+            "event_time": event_time,
+            "remind_time": updated_remind_time,
+            "type": updated_type,
+            "event_description": moment_data.get("event_description")
+            or existing_moment.event_description,
             "emotion": moment_data.get("emotion") or existing_moment.emotion,
-            "emotion_level": moment_data.get("emotion_level") or existing_moment.emotion_level,
-            "importance": moment_data.get("importance", existing_moment.importance),
-            "first_message": moment_data.get("first_message") or existing_moment.first_message,
-            "ai_attitude": moment_data.get("ai_attitude") or existing_moment.ai_attitude,
+            "emotion_level": moment_data.get("emotion_level")
+            if moment_data.get("emotion_level") is not None
+            else existing_moment.emotion_level,
+            "importance": updated_importance,
+            "suggested_action": moment_data.get("suggested_action")
+            or existing_moment.suggested_action,
             "suggested_timing": moment_data.get("suggested_timing")
             or existing_moment.suggested_timing,
+            "first_message": moment_data.get("first_message")
+            or existing_moment.first_message,
+            "ai_attitude": moment_data.get("ai_attitude") or existing_moment.ai_attitude,
             "reason": moment_data.get("reason") or existing_moment.reason,
             "context_messages": context_messages,  # 更新上下文
         }
@@ -324,7 +344,7 @@ class MomentService:
             "first_message": data.first_message,
             "ai_attitude": data.ai_attitude,
             "reason": data.reason,
-            "status": "pending",
+            "status": 1,
             "confirmed": False,
             "executed_at": None,
             "context_messages": None,
@@ -362,7 +382,24 @@ class MomentService:
         """获取用户的关键时刻列表"""
         query = {"user_id": user_id}
         if status:
-            query["status"] = status
+            # 兼容输入：pending/scheduled/completed/cancelled 或 "1"/"2"/"3"
+            if status in ("pending", "scheduled", "completed", "cancelled"):
+                if status == "pending":
+                    query["status"] = 1
+                    query["confirmed"] = False
+                elif status == "scheduled":
+                    query["status"] = 1
+                    query["confirmed"] = True
+                elif status == "completed":
+                    query["status"] = 2
+                else:
+                    query["status"] = 3
+            else:
+                try:
+                    query["status"] = int(status)
+                except Exception:
+                    # 非法 status 直接忽略过滤，让调用方能拿到全量数据定位问题
+                    pass
 
         moments = await self.moment_repo.find_many(
             query, limit=limit, skip=skip, sort=[("event_time", 1)]
@@ -429,7 +466,7 @@ class MomentService:
         """确认关键时刻"""
         moment = await self.moment_repo.update(
             {"moment_id": moment_id},
-            {"confirmed": True, "status": "scheduled", "updated_at": datetime.utcnow()},
+            {"confirmed": True, "status": 1, "updated_at": datetime.utcnow()},
         )
         if not moment:
             raise ResourceNotFoundError(f"关键时刻不存在: {moment_id}")
@@ -462,7 +499,7 @@ class MomentService:
         """取消关键时刻"""
         moment = await self.moment_repo.update(
             {"moment_id": moment_id},
-            {"status": "cancelled", "updated_at": datetime.utcnow()},
+            {"status": 3, "updated_at": datetime.utcnow()},
         )
         if not moment:
             raise ResourceNotFoundError(f"关键时刻不存在: {moment_id}")

@@ -3,6 +3,12 @@
 
 ---
 
+## AGENTS 索引（统一入口）
+
+- [agents.md](../../agents.md) - Agent 协作约束与角色清单
+
+---
+
 ## 成员清单
 
 **user.py**: UserService，用户 CRUD 业务逻辑，create_user 校验用户名唯一性（DuplicateKeyError），delete_user 抛出 ResourceNotFoundError
@@ -13,9 +19,11 @@
 
 **message.py**: MessageService，消息持久化与查询，create_message 自动计算 token_count（tiktoken），get_conversation_messages 按时间升序返回
 
-**llm.py**: **核心** LLMService，LLM 调用与上下文编排，generate_response 核心方法，_build_context 拼接上下文，_trim_context 滑动窗口裁剪，支持上下文压缩
+**llm.py**: **核心** LLMService，LLM 调用与上下文编排；要求 LLM 返回 JSON（chat_response/emotion_tags/emotion_level/moment），并在 Router 层触发 moment 创建
 
-**context_compression.py**: ContextCompressionService，上下文压缩服务，compress_context 方法，将早期消息压缩为摘要，节省 65% token 消耗
+**context_compression.py**: ContextCompressionService，上下文压缩服务，compress_messages 通过 OpenAI 生成摘要（失败降级为简单摘要），受 ENABLE_CONTEXT_COMPRESSION 控制
+
+**moment.py**: MomentService，关键时刻创建/手动创建/查询/确认/取消；时间解析使用 dateparser；去重使用“时间窗口 + 描述相似度”
 
 ---
 
@@ -26,8 +34,8 @@
 2. 检查是否需要压缩上下文（可选功能）
 3. 构建上下文：[system_prompt] + history + [user_message]
 4. 裁剪上下文（滑动窗口策略，保留 system + 最新 user）
-5. 调用 OpenAI API
-6. 返回 assistant 回复
+5. 调用 OpenAI API（优先使用 response_format=json_object，取决于模型名）
+6. 解析 JSON 响应：chat_response/emotion_tags/emotion_level/moment
 
 ### 裁剪策略
 - 计算总 token 数（tiktoken cl100k_base 编码器）
@@ -46,7 +54,7 @@
 ## 上下文压缩：context_compression.py
 
 ### 职责
-当对话历史超过阈值时，自动压缩早期消息为摘要，节省 token 消耗。
+当对话历史超过阈值时（COMPRESSION_THRESHOLD），自动压缩早期消息为摘要，节省 token 消耗。
 
 ### 压缩策略
 1. 检查消息数是否超过 COMPRESSION_THRESHOLD（默认 30）
@@ -65,4 +73,4 @@
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
-[LAST_UPDATED]: 2026-01-20
+[LAST_UPDATED]: 2026-02-03

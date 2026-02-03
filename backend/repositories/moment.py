@@ -118,6 +118,9 @@ class MomentRepository:
         if "status" in query:
             values.append(query["status"])
             conditions.append(f"status = ${len(values)}")
+        if "confirmed" in query:
+            values.append(query["confirmed"])
+            conditions.append(f"confirmed = ${len(values)}")
         if "conversation_id" in query:
             values.append(query["conversation_id"])
             conditions.append(f"conversation_id = ${len(values)}")
@@ -195,7 +198,7 @@ class MomentRepository:
             "user_id = $1",
             "event_time >= $2",
             "event_time <= $3",
-            "status <> 'cancelled'",
+            "status <> 3",
         ]
         values: List[Any] = [user_id, start_time, end_time]
 
@@ -220,7 +223,7 @@ class MomentRepository:
         async with pg.pool.acquire() as conn:
             records = await conn.fetch(
                 "SELECT * FROM moments "
-                "WHERE remind_time <= $1 AND status = 'scheduled' "
+                "WHERE remind_time <= $1 AND status = 1 AND confirmed = TRUE "
                 "ORDER BY remind_time ASC LIMIT $2",
                 remind_time_before,
                 limit,

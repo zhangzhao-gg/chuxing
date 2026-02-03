@@ -54,8 +54,11 @@ class MomentResponse(BaseModel):
     first_message: Optional[str] = Field(None, description="触达时的第一句话")
     ai_attitude: Optional[str] = Field(None, description="AI的态度")
     reason: Optional[str] = Field(None, description="关键时刻判断理由")
-    status: Literal["pending", "scheduled", "completed", "cancelled"] = Field(
-        ..., description="状态"
+    status: int = Field(
+        ...,
+        ge=1,
+        le=3,
+        description="状态编码：pending=1 scheduled=1 completed=2 cancelled=3（pending/scheduled 通过 confirmed 区分）",
     )
     confirmed: bool = Field(default=False, description="用户是否确认")
     executed_at: Optional[datetime] = Field(None, description="实际执行时间")
@@ -86,7 +89,7 @@ class MomentInDB(BaseModel):
     first_message: Optional[str] = None
     ai_attitude: Optional[str] = None
     reason: Optional[str] = None
-    status: Literal["pending", "scheduled", "completed", "cancelled"]
+    status: int
     confirmed: bool = False
     executed_at: Optional[datetime] = None
     context_messages: Optional[List[Dict[str, Any]]] = None
