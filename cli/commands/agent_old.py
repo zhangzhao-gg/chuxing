@@ -34,9 +34,7 @@ def _compose_system_prompt(
     base_prompt: Optional[str],
 ) -> str:
     parts = []
-    agent_name = name.strip()
-    if agent_name:
-        parts.append(f"你的名字是：{agent_name}")
+    
     if persona_constraints:
         parts.append(persona_constraints.strip())
     parts.append(moment_definition.strip())
@@ -94,9 +92,6 @@ def create_agent(
     """创建 Agent"""
     client = APIClient(api_url)
     try:
-        if not name.strip():
-            raise ValueError("--name 不能为空")
-
         # -------------------- 参数互斥校验 --------------------
         if system_prompt and system_prompt_file:
             raise ValueError("--system-prompt 与 --system-prompt-file 只能二选一")
@@ -131,7 +126,6 @@ def create_agent(
             )
 
         final_prompt = _compose_system_prompt(
-            name=name,
             moment_definition=moment_def_text,
             persona_constraints=persona_text,
             base_prompt=base_prompt_text,

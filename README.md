@@ -51,7 +51,7 @@ uv run cli user create --username alice
 # 创建 Agent
 uv run cli agent create \
   --name "Python专家" \
-  --system-prompt "你是一个精通Python的资深工程师，善于解释复杂概念" \
+  --persona "你是一个精通Python的资深工程师，善于解释复杂概念" \
   --model "gpt-4o-mini"
 
 # 列出所有用户和 Agent，获取 user_id 和 agent_id
@@ -60,6 +60,9 @@ uv run cli agent list
 
 # 启动对话（替换为实际的 ID）
 uv run cli chat start --user-id <user_id> --agent-id <agent_id>
+
+# （可选）非交互式批量对话：生成转录 + 关键时刻报告
+uv run cli chat simulate --user-id <user_id> --agent-id <agent_id> --rounds 50 --output moment_test_50.txt
 ```
 
 ## 项目结构
@@ -178,13 +181,20 @@ uv run cli user list
 
 ### Agent 管理
 ```bash
-uv run cli agent create --name <name> --system-prompt <prompt> --model <model>
+uv run cli agent create --name <name> --persona <persona> --model <model>
+# 关键时刻定义默认内置，也可覆盖（与 --moment-definition-file 二选一）
+uv run cli agent create --name <name> --persona <persona> --moment-definition-file moment.txt --model <model>
 uv run cli agent list
 ```
 
 ### 交互式对话
 ```bash
 uv run cli chat start --user-id <id> --agent-id <id>
+```
+
+### 非交互式批量对话（关键时刻识别测试）
+```bash
+uv run cli chat simulate --user-id <id> --agent-id <id> --rounds 50 --output out.txt
 ```
 
 ## 设计哲学

@@ -125,7 +125,7 @@ uv run uvicorn backend.main:app --reload --port 8000
 
 ```bash
 uv run cli user create --username alice
-uv run cli agent create --name "Python专家" --system-prompt "你是一个精通Python的资深工程师" --model "gpt-4o-mini"
+uv run cli agent create --name "Python专家" --persona "你是一个精通Python的资深工程师" --model "gpt-4o-mini"
 uv run cli chat start --user-id <user_id> --agent-id <agent_id>
 ```
 
@@ -142,4 +142,4 @@ uv run cli chat start --user-id <user_id> --agent-id <agent_id>
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查子模块 CLAUDE.md
-[LAST_UPDATED]: 2026-02-03
+[LAST_UPDATED]: 2026-02-06
