@@ -102,11 +102,11 @@ CLI Client → HTTP → Router → Service → Repository → (MongoDB / Postgre
 # MongoDB
 docker run -d -p 27017:27017 --name mongo mongo:7
 
-# PostgreSQL（注意端口与代码默认一致：55432）
+# PostgreSQL（注意端口与代码默认一致：5432）
 docker run -d --name pg \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=llm_chat \
-  -p 55432:5432 \
+  -p 5432:5432 \
   postgres:16
 
 # 配置环境变量
@@ -142,4 +142,4 @@ uv run cli chat start --user-id <user_id> --agent-id <agent_id>
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查子模块 CLAUDE.md
-[LAST_UPDATED]: 2026-02-06
+[LAST_UPDATED]: 2026-02-08
