@@ -17,7 +17,14 @@ class APIClient:
 
     def __init__(self, base_url: str = "http://localhost:8000"):
         self.base_url = base_url.rstrip("/")
-        self.client = httpx.Client(base_url=self.base_url, timeout=30.0)
+        # NOTE:
+        # - Windows 上常见全局代理变量；如果让 localhost 走代理，会导致随机 502/连接失败
+        # - trust_env=False 强制忽略环境代理，确保本地回环稳定
+        self.client = httpx.Client(
+            base_url=self.base_url,
+            timeout=120.0,
+            trust_env=False,
+        )
 
     def close(self):
         """关闭客户端"""
@@ -86,5 +93,25 @@ class APIClient:
         response = self.client.get(
             f"/api/conversations/{conv_id}/messages", params={"limit": limit}
         )
+        response.raise_for_status()
+        return response.json()
+
+    # ==================== 关键时刻（Moments） ====================
+    def list_moments(
+        self,
+        user_id: str,
+        status: Optional[str] = None,
+        limit: int = 500,
+        skip: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """获取用户的关键时刻列表（可按状态过滤）"""
+        params: Dict[str, Any] = {
+            "user_id": user_id,
+            "limit": limit,
+            "skip": skip,
+        }
+        if status:
+            params["status"] = status
+        response = self.client.get("/api/moments", params=params)
         response.raise_for_status()
         return response.json()

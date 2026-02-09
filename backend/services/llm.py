@@ -114,24 +114,46 @@ class LLMService:
                 f"调用 OpenAI: model={agent.model}, messages_count={len(messages)}"
             )
             
-            # 检查模型是否支持json_object格式（GPT-4o-mini和GPT-4o支持）
             create_params = {
                 "model": agent.model,
                 "messages": messages,
-                "temperature": 0.7,
+                # 降低温度：结构化输出优先，减少“非JSON”概率
+                "temperature": 0.3,
                 "max_tokens": 2048,  # 增加token限制，因为需要返回更多信息
             }
             
-            # 如果模型支持，使用json_object格式
-            if "gpt-4o" in agent.model or "gpt-4" in agent.model:
-                create_params["response_format"] = {"type": "json_object"}
-            
-            response = await self.openai_client.chat.completions.create(**create_params)
+            # 优先尝试强制 JSON；若兼容服务不支持 response_format，再降级重试
+            response = await self._call_with_optional_json_response_format(create_params)
             response_content = response.choices[0].message.content
             logger.info(f"OpenAI 响应成功: length={len(response_content)}")
 
-            # 8. 解析JSON响应
-            return self._parse_llm_response(response_content)
+            # 8. 解析 JSON；若失败，自动重试一次（temperature=0.0）避免偶发纯文本
+            parsed = self._try_parse_llm_json(response_content)
+            if parsed is None:
+                logger.warning(
+                    "LLM返回JSON解析失败，触发一次重试（强制只输出JSON）。前200字符: %s",
+                    response_content[:200],
+                )
+                retry_params = dict(create_params)
+                retry_params["temperature"] = 0.0
+                retry_response = await self._call_with_optional_json_response_format(
+                    retry_params
+                )
+                retry_content = retry_response.choices[0].message.content
+                parsed = self._try_parse_llm_json(retry_content)
+                if parsed is None:
+                    logger.warning(
+                        "LLM重试后仍无法解析JSON，降级返回纯文本。前200字符: %s",
+                        retry_content[:200],
+                    )
+                    return {
+                        "chat_response": retry_content,
+                        "emotion_tags": [],
+                        "emotion_level": 0,
+                        "moment": None,
+                    }
+
+            return self._normalize_llm_result(parsed)
 
         except Exception as e:
             logger.error(f"OpenAI 调用失败: {e}")
@@ -165,45 +187,49 @@ moment字段格式（如果存在）：
 
 请严格按照JSON格式返回，不要包含任何markdown代码块标记。"""
 
-    def _parse_llm_response(self, response_content: str) -> Dict[str, Any]:
-        """解析LLM返回的JSON响应"""
+    async def _call_with_optional_json_response_format(self, create_params: Dict[str, Any]):
+        """调用 OpenAI/兼容服务：优先携带 response_format=json_object；不支持则自动降级。"""
+        params_with_json = dict(create_params)
+        params_with_json["response_format"] = {"type": "json_object"}
         try:
-            # 尝试提取JSON（可能包含markdown代码块）
+            return await self.openai_client.chat.completions.create(**params_with_json)
+        except Exception as e:
+            # 兼容：部分 OpenAI 兼容服务不支持 response_format
+            logger.info("response_format=json_object 不支持，降级重试: %s", e)
+            params_plain = dict(create_params)
+            params_plain.pop("response_format", None)
+            return await self.openai_client.chat.completions.create(**params_plain)
+
+    def _try_parse_llm_json(self, response_content: str) -> Optional[Dict[str, Any]]:
+        """尽力从 LLM 输出中提取 JSON 对象；失败返回 None。"""
+        try:
             json_match = re.search(r"\{[\s\S]*\}", response_content)
             if json_match:
-                result = json.loads(json_match.group())
-            else:
-                result = json.loads(response_content)
+                return json.loads(json_match.group())
+            return json.loads(response_content)
+        except Exception:
+            return None
 
-            # 确保必需字段存在
-            chat_response = result.get("chat_response", "")
-            emotion_tags = result.get("emotion_tags", [])
-            emotion_level = result.get("emotion_level", 0)
-            moment = result.get("moment")
+    def _normalize_llm_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """规范化 LLM 的结构化输出，保证下游字段类型稳定。"""
+        chat_response = result.get("chat_response", "")
+        emotion_tags = result.get("emotion_tags", [])
+        emotion_level = result.get("emotion_level", 0)
+        moment = result.get("moment")
 
-            # 验证moment字段格式
-            if moment and moment.get("is_moment"):
-                # moment字段存在且is_moment为true
-                pass
-            else:
-                moment = None
+        if moment and isinstance(moment, dict) and moment.get("is_moment"):
+            pass
+        else:
+            moment = None
 
-            return {
-                "chat_response": chat_response,
-                "emotion_tags": emotion_tags if isinstance(emotion_tags, list) else [],
-                "emotion_level": emotion_level if isinstance(emotion_level, int) else 0,
-                "moment": moment,
-            }
-
-        except json.JSONDecodeError as e:
-            logger.warning(f"LLM返回JSON解析失败: {e}, 内容: {response_content[:200]}")
-            # 如果解析失败，尝试提取纯文本作为对话回复
-            return {
-                "chat_response": response_content,
-                "emotion_tags": [],
-                "emotion_level": 0,
-                "moment": None,
-            }
+        return {
+            "chat_response": chat_response
+            if isinstance(chat_response, str)
+            else str(chat_response),
+            "emotion_tags": emotion_tags if isinstance(emotion_tags, list) else [],
+            "emotion_level": emotion_level if isinstance(emotion_level, int) else 0,
+            "moment": moment,
+        }
 
     async def _compress_context(
         self, history_messages: List[Dict[str, Any]]
