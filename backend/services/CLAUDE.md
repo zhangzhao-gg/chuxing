@@ -19,11 +19,11 @@
 
 **message.py**: MessageService，消息持久化与查询，create_message 自动计算 token_count（tiktoken），get_conversation_messages 按时间升序返回
 
-**llm.py**: **核心** LLMService，LLM 调用与上下文编排；要求 LLM 返回 JSON（chat_response/emotion_tags/emotion_level/moment），并在 Router 层触发 moment 创建
+**llm.py**: **核心** LLMService，LLM 调用与上下文编排；要求 LLM 返回 JSON（chat_response/emotion_tags/emotion_level/moment/moment_updates），并基于 open_moments 决策去重（重复则 moment=null）；新 moment 需输出 needs_user_confirm（是否需要用户确认）
 
 **context_compression.py**: ContextCompressionService，上下文压缩服务，compress_messages 通过 OpenAI 生成摘要（失败降级为简单摘要），受 ENABLE_CONTEXT_COMPRESSION 控制
 
-**moment.py**: MomentService，关键时刻创建/手动创建/查询/确认/取消；时间解析使用 dateparser；去重使用“时间窗口 + 描述相似度”
+**moment.py**: MomentService，关键时刻创建/手动创建/查询/确认/取消；时间解析使用 dateparser；服务端不做相似度去重，去重由对话时注入的 open_moments 驱动（LLM 重复则 moment=null）；创建新 moment 时 `confirmed` 由 LLM 的 needs_user_confirm 决策（不需要确认→直接进入调度态）
 
 ---
 
@@ -35,7 +35,7 @@
 3. 构建上下文：[system_prompt] + history + [user_message]
 4. 裁剪上下文（滑动窗口策略，保留 system + 最新 user）
 5. 调用 OpenAI API（优先使用 response_format=json_object，取决于模型名）
-6. 解析 JSON 响应：chat_response/emotion_tags/emotion_level/moment
+6. 解析 JSON 响应：chat_response/emotion_tags/emotion_level/moment/moment_updates
 
 ### 裁剪策略
 - 计算总 token 数（tiktoken cl100k_base 编码器）
@@ -73,4 +73,4 @@
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
-[LAST_UPDATED]: 2026-02-03
+[LAST_UPDATED]: 2026-02-10

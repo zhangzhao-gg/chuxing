@@ -39,7 +39,7 @@
 - agent.py: AgentService，Agent CRUD，支持更新配置
 - conversation.py: ConversationService，会话管理，校验 user/agent 存在性
 - message.py: MessageService，消息持久化，token 计算（tiktoken）
-- llm.py: **核心** LLMService，上下文拼接 + 滑动窗口裁剪 + OpenAI 调用；要求返回 JSON（对话回复 + 情绪 + moment）
+- llm.py: **核心** LLMService，上下文拼接 + 滑动窗口裁剪 + OpenAI 调用；要求返回 JSON（chat_response/emotion_tags/emotion_level/moment/moment_updates）
 - context_compression.py: ContextCompressionService，上下文压缩（调用 OpenAI 生成摘要，失败则降级）
 - moment.py: MomentService，关键时刻创建/时间解析（dateparser）/去重/确认/取消
 
@@ -49,6 +49,8 @@
 - conversations.py: 会话管理 REST API（POST/GET/DELETE /api/conversations）
 - messages.py: **核心** 对话接口（POST /api/conversations/{conv_id}/chat），数据流汇聚点（包含 moment 识别后的创建）
 - moments.py: 关键时刻管理 API（/api/moments，含 confirm/cancel）
+
+**tests/**: 回归测试（unittest），覆盖对话链路的查重与状态更新行为（不依赖真实 DB/OpenAI）
 
 ---
 
@@ -71,7 +73,7 @@ Repository（数据访问）
 
 ### services/llm.py - 系统核心价值
 **职责**: LLM 调用与上下文编排
-**关键方法**: generate_response(conv_id, user_message) → str
+**关键方法**: generate_response(conv_id, user_message, open_moments=None) → Dict（chat_response/emotion/moment/moment_updates）
 **裁剪策略**: 滑动窗口，保留 system_prompt（agent 人格）+ 最新 user（用户意图），删除中间历史
 **上下文压缩**: 当消息数超过阈值时，自动压缩早期消息为摘要（可选功能）
 
@@ -83,10 +85,10 @@ Repository（数据访问）
 
 ### routers/messages.py - 数据流汇聚点
 **职责**: 核心对话接口
-**数据流**: 保存 user → LLM 返回（chat_response/emotion/moment）→ 保存 assistant → 更新会话时间戳 → 如有 moment 则创建关键时刻 → 返回 assistant
+**数据流**: 保存 user → 注入“用户所有 open moments（未完成且未取消）”→ LLM 返回（chat_response/emotion/moment/moment_updates）→ 按 moment_updates 更新对应 moment 状态 → 保存 assistant → 更新会话时间戳 → 如有 moment 则创建关键时刻 → 返回 assistant
 **错误处理**: ResourceNotFoundError → 404，LLMError → 502，Exception → 500（关键时刻创建失败不影响对话流程）
 
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
-[LAST_UPDATED]: 2026-02-03
+[LAST_UPDATED]: 2026-02-10

@@ -13,6 +13,7 @@
 - [backend/repositories：CLAUDE.md](./backend/repositories/CLAUDE.md)
 - [backend/routers：CLAUDE.md](./backend/routers/CLAUDE.md)
 - [backend/services：CLAUDE.md](./backend/services/CLAUDE.md)
+- [backend/tests：CLAUDE.md](./backend/tests/CLAUDE.md)
 - [cli：CLAUDE.md](./cli/CLAUDE.md)
 
 ---

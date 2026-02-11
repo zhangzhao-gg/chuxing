@@ -29,11 +29,13 @@
 
 **数据流**:
 1. 保存 user message（MessageService.create_message）
-2. 调用 LLMService.generate_response 生成回复（返回 JSON：chat_response/emotion_tags/emotion_level/moment）
-3. 保存 assistant message
-4. 更新会话时间戳（ConversationService.update_conversation_timestamp）
-5. 如果识别到 moment，则创建关键时刻记录（MomentService.create_moment_from_llm_response；失败不影响对话）
-6. 返回 assistant 回复
+2. 注入“当前用户所有未完成且未取消的关键时刻（open moments）”（status!=2 且 status!=3）
+3. 调用 LLMService.generate_response 生成回复（返回 JSON：chat_response/emotion_tags/emotion_level/moment/moment_updates）
+4. 按 moment_updates 更新对应 moment 状态（confirm/cancel/complete；失败不影响对话）
+5. 保存 assistant message
+6. 更新会话时间戳（ConversationService.update_conversation_timestamp）
+7. 如果识别到 moment，则创建关键时刻记录（MomentService.create_moment_from_llm_response；失败不影响对话）
+8. 返回 assistant 回复
 
 **错误处理**:
 - ResourceNotFoundError（会话/Agent 不存在）→ 404

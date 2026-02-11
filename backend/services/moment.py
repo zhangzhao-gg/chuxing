@@ -1,6 +1,6 @@
 """
-[INPUT]: 依赖 backend.repositories.moment 的 MomentRepository，依赖 backend.repositories.message 的 MessageRepository，依赖 backend.repositories.conversation 的 ConversationRepository，依赖 backend.models.moment 的 MomentCreate/MomentResponse/MomentInDB，依赖 openai 的 AsyncOpenAI，依赖 backend.core.config 的 settings，依赖 dateparser 的时间解析
-[OUTPUT]: 对外提供 MomentService 类，封装关键时刻识别与存储逻辑
+[INPUT]: 依赖 backend.repositories.moment 的 MomentRepository，依赖 backend.repositories.message 的 MessageRepository，依赖 backend.repositories.conversation 的 ConversationRepository，依赖 backend.models.moment 的 MomentCreate/MomentResponse/MomentInDB，依赖 dateparser 的时间解析
+[OUTPUT]: 对外提供 MomentService 类，封装关键时刻识别/存储/确认/取消，以及 pending moment 的获取与 AI 状态更新
 [POS]: backend/services 的关键时刻业务逻辑层，被 Router 和 LLMService 消费
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -27,8 +27,12 @@ class MomentService:
     职责：
     1. 从LLM返回的moment信息中创建关键时刻
     2. 时间解析（自然语言 → datetime）
-    3. 去重逻辑
-    4. 关键时刻存储
+    3. 关键时刻存储
+
+    去重策略（Good Taste）：
+    - 取消“时间窗口 + 文本相似度”的服务端猜测
+    - 去重由上游在每次对话时注入的 open_moments 驱动：
+      LLM 若判断“新识别 moment 与 open_moments 中任意一条同一件事”，则直接返回 moment=null，避免重复创建
     """
 
     def __init__(self):
@@ -65,29 +69,8 @@ class MomentService:
             logger.warning(f"无法解析时间: {moment_data.get('time')}")
             return None
 
-        # 2. 去重检查（同一会话 + 时间窗口内 + 描述相似度）
-        # - 先按时间窗口筛掉绝大多数无关记录
-        # - 再用事件描述相似度做细筛，避免重复创建
-        similar_moments = await self.moment_repo.find_similar_moments(
-            user_id, event_time, conversation_id=conv_id
-        )
-        if similar_moments:
-            # 检查事件描述相似度
-            for existing_moment in similar_moments:
-                similarity = self._calculate_similarity(
-                    moment_data.get("event_description", ""),
-                    existing_moment.event_description,
-                )
-                if similarity > 0.8:
-                    logger.info(
-                        f"发现相似关键时刻，更新而非创建: {existing_moment.moment_id}"
-                    )
-                    # 更新现有关键时刻
-                    return await self._update_existing_moment(
-                        existing_moment, event_time, moment_data, context_messages
-                    )
-
-        # 3. 创建新的关键时刻
+        # 2. 创建新的关键时刻
+        # 备注：去重由 LLM 基于 open_moments 决策完成；服务端不再做相似度猜测
         return await self._create_moment(
             user_id, conv_id, event_time, moment_data, context_messages
         )
@@ -139,22 +122,6 @@ class MomentService:
 
         return None
 
-    def _calculate_similarity(self, text1: str, text2: str) -> float:
-        """计算两个文本的相似度（简单版本）
-
-        使用字符集合重叠度：
-        - 交集 / 并集
-        - 对短文本友好，但不等价于语义相似
-        """
-        # 将文本拆成字符集合，忽略顺序，仅保留出现过的字符
-        words1 = set(text1)
-        words2 = set(text2)
-        if not words1 or not words2:
-            return 0.0
-        intersection = len(words1 & words2)
-        union = len(words1 | words2)
-        return intersection / union if union > 0 else 0.0
-
     async def _create_moment(
         self,
         user_id: str,
@@ -168,6 +135,23 @@ class MomentService:
         remind_time = self._calculate_remind_time(
             event_time, moment_data.get("importance", "mid"), moment_data.get("type", "event")
         )
+
+        # 关键时刻确认逻辑（由 AI 决策，Good Taste：用一个布尔值消灭分支爆炸）
+        # - needs_user_confirm=true  → pending（confirmed=false，等待用户确认）
+        # - needs_user_confirm=false → scheduled（confirmed=true，直接进入调度队列）
+        needs_user_confirm_raw = moment_data.get("needs_user_confirm", True)
+        if isinstance(needs_user_confirm_raw, bool):
+            needs_user_confirm = needs_user_confirm_raw
+        elif isinstance(needs_user_confirm_raw, str):
+            v = needs_user_confirm_raw.strip().lower()
+            if v in ("false", "0", "no", "n", "否", "不需要"):
+                needs_user_confirm = False
+            elif v in ("true", "1", "yes", "y", "是", "需要"):
+                needs_user_confirm = True
+            else:
+                needs_user_confirm = True
+        else:
+            needs_user_confirm = True
 
         moment_doc = {
             "moment_id": str(uuid.uuid4()),
@@ -188,7 +172,7 @@ class MomentService:
             "ai_attitude": moment_data.get("ai_attitude"),
             "reason": moment_data.get("reason"),
             "status": 1,
-            "confirmed": False,
+            "confirmed": (not needs_user_confirm),
             "executed_at": None,
             "context_messages": context_messages,
         }
@@ -219,77 +203,6 @@ class MomentService:
             confirmed=moment_in_db.confirmed,
             executed_at=moment_in_db.executed_at,
             context_messages=moment_in_db.context_messages,
-        )
-
-    async def _update_existing_moment(
-        self,
-        existing_moment: MomentInDB,
-        event_time: datetime,
-        moment_data: Dict[str, Any],
-        context_messages: List[Dict[str, str]],
-    ) -> MomentResponse:
-        """更新现有的关键时刻"""
-        # 当同一个关键时刻发生变化时：同步更新关键字段，避免“数据漂移”
-        # - status 编码：pending=1 scheduled=1 completed=2 cancelled=3
-        # - pending vs scheduled 通过 confirmed 字段区分，所以这里不主动覆盖 confirmed/status
-        updated_type = moment_data.get("type") or existing_moment.type
-        updated_importance = moment_data.get("importance") or existing_moment.importance
-        updated_remind_time = self._calculate_remind_time(
-            event_time, updated_importance, updated_type
-        )
-
-        update_doc = {
-            "updated_at": datetime.utcnow(),
-            "event_time": event_time,
-            "remind_time": updated_remind_time,
-            "type": updated_type,
-            "event_description": moment_data.get("event_description")
-            or existing_moment.event_description,
-            "emotion": moment_data.get("emotion") or existing_moment.emotion,
-            "emotion_level": moment_data.get("emotion_level")
-            if moment_data.get("emotion_level") is not None
-            else existing_moment.emotion_level,
-            "importance": updated_importance,
-            "suggested_action": moment_data.get("suggested_action")
-            or existing_moment.suggested_action,
-            "suggested_timing": moment_data.get("suggested_timing")
-            or existing_moment.suggested_timing,
-            "first_message": moment_data.get("first_message")
-            or existing_moment.first_message,
-            "ai_attitude": moment_data.get("ai_attitude") or existing_moment.ai_attitude,
-            "reason": moment_data.get("reason") or existing_moment.reason,
-            "context_messages": context_messages,  # 更新上下文
-        }
-
-        updated_moment = await self.moment_repo.update(
-            {"moment_id": existing_moment.moment_id}, update_doc
-        )
-
-        if not updated_moment:
-            raise ResourceNotFoundError(f"关键时刻不存在: {existing_moment.moment_id}")
-
-        return MomentResponse(
-            moment_id=updated_moment.moment_id,
-            user_id=updated_moment.user_id,
-            conversation_id=updated_moment.conversation_id,
-            event_time=updated_moment.event_time,
-            remind_time=updated_moment.remind_time,
-            created_at=updated_moment.created_at,
-            updated_at=updated_moment.updated_at,
-            type=updated_moment.type,
-            event_description=updated_moment.event_description,
-            emotion=updated_moment.emotion,
-            emotion_level=updated_moment.emotion_level,
-            importance=updated_moment.importance,
-            suggested_action=updated_moment.suggested_action,
-            suggested_timing=updated_moment.suggested_timing,
-            first_message=updated_moment.first_message,
-            ai_attitude=updated_moment.ai_attitude,
-            reason=updated_moment.reason,
-            status=updated_moment.status,
-            confirmed=updated_moment.confirmed,
-            executed_at=updated_moment.executed_at,
-            context_messages=updated_moment.context_messages,
         )
 
     def _calculate_remind_time(
@@ -501,6 +414,77 @@ class MomentService:
             {"moment_id": moment_id},
             {"status": 3, "updated_at": datetime.utcnow()},
         )
+        if not moment:
+            raise ResourceNotFoundError(f"关键时刻不存在: {moment_id}")
+
+        return MomentResponse(
+            moment_id=moment.moment_id,
+            user_id=moment.user_id,
+            conversation_id=moment.conversation_id,
+            event_time=moment.event_time,
+            remind_time=moment.remind_time,
+            created_at=moment.created_at,
+            updated_at=moment.updated_at,
+            type=moment.type,
+            event_description=moment.event_description,
+            emotion=moment.emotion,
+            emotion_level=moment.emotion_level,
+            importance=moment.importance,
+            suggested_action=moment.suggested_action,
+            suggested_timing=moment.suggested_timing,
+            first_message=moment.first_message,
+            ai_attitude=moment.ai_attitude,
+            reason=moment.reason,
+            status=moment.status,
+            confirmed=moment.confirmed,
+            executed_at=moment.executed_at,
+            context_messages=moment.context_messages,
+        )
+
+    async def get_latest_pending_moment(self, user_id: str) -> Optional[MomentInDB]:
+        """获取当前用户最近一个 pending 关键时刻。
+
+        pending 定义：
+        - status=1 且 confirmed=false（confirmed=true 则视为 scheduled）
+        """
+        return await self.moment_repo.find_latest_user_pending_moment(user_id)
+
+    async def get_open_moments(self, user_id: str, limit: int = 200) -> List[MomentInDB]:
+        """获取当前用户所有“未完成且未取消”的关键时刻（open moments）。
+
+        open 定义：
+        - status != 2（completed）
+        - status != 3（cancelled）
+        """
+        return await self.moment_repo.find_user_open_moments(user_id, limit=limit)
+
+    async def apply_ai_pending_moment_update(
+        self, moment_id: str, action: str
+    ) -> Optional[MomentResponse]:
+        """让 AI 驱动 pending moment 的状态迁移。
+
+        允许的 action:
+        - none: 不更新
+        - confirm: confirmed=true（进入 scheduled 语义）
+        - cancel: status=3
+        - complete: status=2 + executed_at=now
+        """
+        action_norm = (action or "").strip().lower()
+        if action_norm in ("", "none", "no", "null"):
+            return None
+
+        now = datetime.utcnow()
+        if action_norm == "confirm":
+            update_doc = {"confirmed": True, "status": 1, "updated_at": now}
+        elif action_norm == "cancel":
+            update_doc = {"status": 3, "updated_at": now}
+        elif action_norm == "complete":
+            update_doc = {"status": 2, "executed_at": now, "updated_at": now}
+        else:
+            # 未知 action：直接忽略，让上游日志定位提示词问题
+            return None
+
+        moment = await self.moment_repo.update({"moment_id": moment_id}, update_doc)
         if not moment:
             raise ResourceNotFoundError(f"关键时刻不存在: {moment_id}")
 

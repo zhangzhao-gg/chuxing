@@ -21,7 +21,7 @@
 
 **message.py**: MessageRepository，继承 BaseRepository[MessageInDB]，操作 db.messages 集合，实现 _to_model 转换逻辑
 
-**moment.py**: MomentRepository（PostgreSQL），操作 moments 表；包含 find_similar_moments/find_pending_moments 等去重/调度查询，jsonb 字段做序列化兜底
+**moment.py**: MomentRepository（PostgreSQL），操作 moments 表；包含 find_user_open_moments/find_latest_user_pending_moment/find_pending_moments 等对话注入/调度查询，jsonb 字段做序列化兜底
 
 ---
 

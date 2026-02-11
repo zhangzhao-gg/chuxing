@@ -61,6 +61,7 @@ env/
 htmlcov/
 .pytest_cache/
 .hypothesis/
+backend/tests/
 
 
 # ============================================================

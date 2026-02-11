@@ -173,49 +173,6 @@ class MomentRepository:
             record = await conn.fetchrow(sql, *values)
         return self._to_model(record) if record else None
 
-    async def find_similar_moments(
-        self,
-        user_id: str,
-        event_time: datetime,
-        conversation_id: Optional[str] = None,
-        time_window_hours: int = 2,
-    ) -> List[MomentInDB]:
-        """查找相似的关键时刻（用于去重）"""
-        start_time = event_time.replace(
-            hour=max(0, event_time.hour - time_window_hours),
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-        end_time = event_time.replace(
-            hour=min(23, event_time.hour + time_window_hours),
-            minute=59,
-            second=59,
-            microsecond=999999,
-        )
-
-        conditions = [
-            "user_id = $1",
-            "event_time >= $2",
-            "event_time <= $3",
-            "status <> 3",
-        ]
-        values: List[Any] = [user_id, start_time, end_time]
-
-        if conversation_id:
-            values.append(conversation_id)
-            conditions.append(f"conversation_id = ${len(values)}")
-
-        sql = (
-            "SELECT * FROM moments WHERE "
-            + " AND ".join(conditions)
-            + " ORDER BY event_time DESC LIMIT 10"
-        )
-
-        async with pg.pool.acquire() as conn:
-            records = await conn.fetch(sql, *values)
-        return [self._to_model(record) for record in records]
-
     async def find_pending_moments(
         self, remind_time_before: datetime, limit: int = 100
     ) -> List[MomentInDB]:
@@ -226,6 +183,40 @@ class MomentRepository:
                 "WHERE remind_time <= $1 AND status = 1 AND confirmed = TRUE "
                 "ORDER BY remind_time ASC LIMIT $2",
                 remind_time_before,
+                limit,
+            )
+        return [self._to_model(record) for record in records]
+
+    async def find_latest_user_pending_moment(self, user_id: str) -> Optional[MomentInDB]:
+        """获取用户最近一个 pending 关键时刻（status=1 且 confirmed=false）。
+
+        备注：
+        - status 编码：pending=1 scheduled=1 completed=2 cancelled=3
+        - pending vs scheduled 通过 confirmed 字段区分
+        """
+        async with pg.pool.acquire() as conn:
+            record = await conn.fetchrow(
+                "SELECT * FROM moments "
+                "WHERE user_id = $1 AND status = 1 AND confirmed = FALSE "
+                "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                user_id,
+            )
+        return self._to_model(record) if record else None
+
+    async def find_user_open_moments(self, user_id: str, limit: int = 200) -> List[MomentInDB]:
+        """获取用户所有“未完成且未取消”的关键时刻（用于对话侧注入给 LLM）。
+
+        约定：
+        - completed=2
+        - cancelled=3
+        - 其余状态都视为 open（当前主要是 status=1，pending/scheduled 由 confirmed 区分）
+        """
+        async with pg.pool.acquire() as conn:
+            records = await conn.fetch(
+                "SELECT * FROM moments "
+                "WHERE user_id = $1 AND status <> 2 AND status <> 3 "
+                "ORDER BY updated_at DESC, created_at DESC LIMIT $2",
+                user_id,
                 limit,
             )
         return [self._to_model(record) for record in records]

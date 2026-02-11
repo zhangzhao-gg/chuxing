@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 backend.services.message 的 MessageService，依赖 backend.repositories.agent 的 AgentRepository，依赖 backend.repositories.conversation 的 ConversationRepository，依赖 openai 的 AsyncOpenAI，依赖 backend.core.config 的 settings
-[OUTPUT]: 对外提供 LLMService 类，封装 LLM 调用与上下文管理逻辑
+[OUTPUT]: 对外提供 LLMService 类，封装 LLM 调用与上下文管理逻辑（支持携带 open_moments，并返回 moment_updates）
 [POS]: backend/services 的 LLM 核心逻辑层，被 Router 的 /chat 接口消费
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -53,7 +53,10 @@ class LLMService:
         self.max_context_tokens = settings.MAX_CONTEXT_TOKENS
 
     async def generate_response(
-        self, conv_id: str, user_message: str
+        self,
+        conv_id: str,
+        user_message: str,
+        open_moments: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """核心方法：生成 LLM 回复，同时进行情绪识别和关键时刻判断
 
@@ -62,7 +65,7 @@ class LLMService:
         2. 获取 agent → system_prompt + model
         3. 加载历史消息（最近 50 条）
         4. 检查是否需要压缩上下文
-        5. 构建上下文 = [system] + (compressed_summary or history) + [user]
+        5. 构建上下文 = [system(包含 open_moments)] + (compressed_summary or history) + [user]
         6. 裁剪上下文（保留 system + 最新 user，删除中间历史）
         7. 调用 OpenAI API（要求返回JSON格式，包含对话回复、情绪、关键时刻）
         8. 解析返回的JSON，提取对话回复、情绪信息、关键时刻信息
@@ -73,6 +76,7 @@ class LLMService:
                 "emotion_tags": List[str],  # 情绪标签
                 "emotion_level": int,  # 情绪强度 0-5
                 "moment": Optional[Dict],  # 关键时刻信息（如果有）
+                "moment_updates": List[Dict],  # AI 对 open_moments 的状态更新指令（可能为空数组）
             }
         """
         # 1. 获取会话信息
@@ -97,8 +101,15 @@ class LLMService:
             logger.info(f"触发上下文压缩: 当前消息数={len(history_messages)}, 阈值={settings.COMPRESSION_THRESHOLD}")
             history_messages = await self._compress_context(history_messages)
 
-        # 5. 构建上下文（增强system prompt，要求返回结构化信息）
-        enhanced_system_prompt = self._build_enhanced_system_prompt(agent.system_prompt)
+        # 5. 构建上下文（增强system prompt，要求返回结构化信息 + 携带 open_moments）
+        open_moments_json = (
+            json.dumps(open_moments, ensure_ascii=False, separators=(",", ":"))
+            if open_moments is not None
+            else "[]"
+        )
+        enhanced_system_prompt = self._build_enhanced_system_prompt(
+            agent.system_prompt, open_moments_json
+        )
         messages = self._build_context(
             enhanced_system_prompt,
             history_messages,
@@ -151,6 +162,7 @@ class LLMService:
                         "emotion_tags": [],
                         "emotion_level": 0,
                         "moment": None,
+                        "moment_updates": [],
                     }
 
             return self._normalize_llm_result(parsed)
@@ -159,15 +171,25 @@ class LLMService:
             logger.error(f"OpenAI 调用失败: {e}")
             raise OpenAIAPIError(f"OpenAI 调用失败: {e}")
 
-    def _build_enhanced_system_prompt(self, original_prompt: str) -> str:
-        """增强系统提示词，要求LLM返回结构化信息"""
+    def _build_enhanced_system_prompt(self, original_prompt: str, open_moments_json: str) -> str:
+        """增强系统提示词，要求LLM返回结构化信息（并携带 open_moments 供状态更新/去重）。"""
         return f"""{original_prompt}
+
+你将额外收到“当前用户所有未完成且未取消的关键时刻（open_moments）”，格式为 JSON 数组（可能为空）：
+open_moments = {open_moments_json}
+
+你需要结合用户最新消息，判断它是否对应 open_moments 中的某一个关键时刻，并在返回中给出 moment_updates（可为空数组）。
+
+去重规则（必须遵守）：
+- 如果你识别到的关键时刻与 open_moments 中任意一条描述的是同一件事（同一事件/同一情绪/同一习惯），则 **不要** 再创建新的 moment，必须返回 moment=null。
+- 只有当用户明确提出了一个“不同于 open_moments 的新关键时刻”时，才返回 moment 对象用于创建新记录。
 
 重要：请以JSON格式返回你的回复，必须包含以下字段：
 1. chat_response: 你的对话回复（自然、有温度的文本）
 2. emotion_tags: 用户当前的情绪标签列表（如：["nervous", "anxious"] 或 ["happy", "excited"]）
 3. emotion_level: 情绪强度（0-5的整数，0=无情绪，5=强烈情绪）
 4. moment: 关键时刻信息（如果用户提到了未来事件、重要情绪或习惯，则填写此字段；否则为null）
+5. moment_updates: 对 open_moments 的状态更新指令数组（如果没有需要更新的关键时刻，则必须返回空数组 []）
 
 moment字段格式（如果存在）：
 {{
@@ -182,10 +204,36 @@ moment字段格式（如果存在）：
     "suggested_timing": "before_event/after_event/on_time",
     "ai_attitude": "AI的态度（鼓励/安慰/祝贺等）",
     "first_message": "触达时的第一句话（50字以内）",
-    "reason": "判断理由"
+    "reason": "判断理由",
+    "needs_user_confirm": true/false
 }}
 
+needs_user_confirm 规则（必须遵守）：
+- true 表示：你认为需要在对话中让用户明确确认“是否要我提醒/是否要我在某时间触达”，后端会把该 moment 作为 pending（confirmed=false）。
+- false 表示：你认为无需用户确认也能直接调度（例如用户明确说“提醒我/到时候别忘了/请你在X点提醒”等），后端会直接将该 moment 视为 scheduled（confirmed=true）。
+
+moment_updates 字段格式（数组，可能为空）：
+[
+  {{
+    "moment_id": "要更新的关键时刻ID（必须来自 open_moments）",
+    "action": "confirm/cancel/complete",
+    "reason": "为什么要这样更新（可选，用于审计/调试）"
+  }}
+]
+
 请严格按照JSON格式返回，不要包含任何markdown代码块标记。"""
+
+    def _coerce_bool(self, value: Any, default: bool) -> bool:
+        """把 LLM 的松散布尔值规范化为 bool。"""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("true", "1", "yes", "y", "是", "需要"):
+                return True
+            if v in ("false", "0", "no", "n", "否", "不需要"):
+                return False
+        return default
 
     async def _call_with_optional_json_response_format(self, create_params: Dict[str, Any]):
         """调用 OpenAI/兼容服务：优先携带 response_format=json_object；不支持则自动降级。"""
@@ -216,11 +264,36 @@ moment字段格式（如果存在）：
         emotion_tags = result.get("emotion_tags", [])
         emotion_level = result.get("emotion_level", 0)
         moment = result.get("moment")
+        moment_updates = result.get("moment_updates")
 
         if moment and isinstance(moment, dict) and moment.get("is_moment"):
-            pass
+            # needs_user_confirm：缺省按“需要确认”处理，避免误调度
+            moment["needs_user_confirm"] = self._coerce_bool(
+                moment.get("needs_user_confirm"), default=True
+            )
         else:
             moment = None
+
+        # moment_updates：允许为空数组；只保留我们认可的字段形状，避免下游被“意外结构”污染
+        normalized_updates: List[Dict[str, Any]] = []
+        if isinstance(moment_updates, list):
+            for item in moment_updates:
+                if not isinstance(item, dict):
+                    continue
+                moment_id = item.get("moment_id")
+                action = (item.get("action") or "").strip().lower()
+                if not moment_id or not isinstance(moment_id, str):
+                    continue
+                if action not in ("confirm", "cancel", "complete"):
+                    # 不接受 none/空/未知动作；上游以“没有该更新项”表达 none
+                    continue
+                normalized_updates.append(
+                    {
+                        "moment_id": moment_id,
+                        "action": action,
+                        "reason": item.get("reason"),
+                    }
+                )
 
         return {
             "chat_response": chat_response
@@ -229,6 +302,7 @@ moment字段格式（如果存在）：
             "emotion_tags": emotion_tags if isinstance(emotion_tags, list) else [],
             "emotion_level": emotion_level if isinstance(emotion_level, int) else 0,
             "moment": moment,
+            "moment_updates": normalized_updates,
         }
 
     async def _compress_context(
