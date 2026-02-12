@@ -53,7 +53,7 @@
 - messages.py: **核心** 对话接口（POST /api/conversations/{conv_id}/chat），数据流汇聚点（包含 moment 识别后的创建）
 - moments.py: 关键时刻管理 API（/api/moments，含 confirm/cancel）
 
-**tests/**: 回归测试（unittest），覆盖对话链路的查重与状态更新行为（不依赖真实 DB/OpenAI）
+**tests/**: 回归测试与 E2E 测试套件，覆盖对话链路查重/状态更新/兑现全生命周期（含独立 E2E 套件 `e2e_suite.py`，合并三个测试场景）
 
 ---
 

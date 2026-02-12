@@ -85,24 +85,57 @@ uv run cli chat start --user-id <user_id> --agent-id <agent_id>
 
 ```
 chuxing/
-├── backend/                  # FastAPI 后端
-│   ├── core/                 # 核心基础设施（config, database, postgres, exceptions）
-│   ├── models/               # Pydantic 数据模型
-│   ├── repositories/         # 数据访问层（MongoDB CRUD + PostgreSQL moments）
-│   ├── services/             # 业务逻辑层（LLM/moment/notification/上下文压缩）
-│   ├── routers/              # API 路由层
-│   ├── main.py               # FastAPI 应用入口
-│   ├── win_entrypoint.py     # Windows 兼容入口点
-│   └── moment_worker.py      # 兑现调度 Worker（独立进程）
+├── backend/                     # FastAPI 后端
+│   ├── core/                    # 核心基础设施
+│   │   ├── config.py            #   Pydantic Settings，环境变量加载
+│   │   ├── database.py          #   MongoDB 连接池管理
+│   │   ├── postgres.py          #   PostgreSQL 连接池管理
+│   │   └── exceptions.py        #   分层异常类型
+│   ├── models/                  # Pydantic 数据模型
+│   │   ├── user.py / agent.py   #   用户 / Agent 模型
+│   │   ├── conversation.py      #   会话模型
+│   │   ├── message.py           #   消息模型
+│   │   └── moment.py            #   关键时刻模型
+│   ├── repositories/            # 数据访问层
+│   │   ├── base.py              #   BaseRepository（MongoDB 通用 CRUD）
+│   │   ├── user / agent / ...   #   各实体 Repository
+│   │   └── moment.py            #   MomentRepository（PostgreSQL）
+│   ├── services/                # 业务逻辑层
+│   │   ├── llm.py               #   核心：LLM 调用与上下文编排
+│   │   ├── moment.py            #   关键时刻创建/时间解析/去重/确认
+│   │   ├── context_compression.py  # 上下文压缩
+│   │   ├── notification.py      #   兑现通知（站内消息）
+│   │   └── user / agent / ...   #   各实体 Service
+│   ├── routers/                 # API 路由层
+│   │   ├── messages.py          #   核心对话接口（含 moment 识别）
+│   │   ├── moments.py           #   关键时刻管理 API
+│   │   └── users / agents / ... #   各实体 REST API
+│   ├── tests/                   # E2E 测试与回归测试
+│   │   ├── e2e_suite.py         #   独立 E2E 套件（3 个测试场景）
+│   │   ├── test_moment_dedup_50_rounds.py
+│   │   ├── test_cli_chat_dedup_report.py
+│   │   └── test_cli_chat_real_db_moments_report.py
+│   ├── main.py                  # FastAPI 应用入口
+│   ├── win_entrypoint.py        # Windows 兼容入口点
+│   └── moment_worker.py         # 兑现调度 Worker（独立进程）
 │
-├── cli/                      # Typer CLI 客户端
-│   ├── commands/             # 子命令（user/agent/chat/moment）
-│   ├── client.py             # HTTP 客户端封装
-│   └── main.py               # CLI 入口
+├── cli/                         # Typer CLI 客户端
+│   ├── commands/                # 子命令
+│   │   ├── user.py / agent.py   #   用户 / Agent 管理
+│   │   ├── chat.py              #   交互式对话
+│   │   ├── moment.py            #   兑现测试（test-delivery）
+│   │   ├── e2e_test.py          #   E2E 对话测试
+│   │   └── e2e_full_lifecycle.py #  全生命周期测试
+│   ├── client.py                # HTTP 客户端封装
+│   └── main.py                  # CLI 入口
 │
-├── docs/                     # 项目文档
+├── docs/                        # 项目文档
+│   ├── ARCHITECTURE.md          #   技术架构设计
+│   ├── PRD.md                   #   产品需求文档
+│   ├── CONTEXT_COMPRESSION.md   #   上下文压缩说明
+│   └── reports/                 #   测试报告（自动生成）
 │
-└── sql/                      # PostgreSQL 结构/数据快照
+└── sql/                         # PostgreSQL 结构/数据快照
 ```
 
 ## 产品架构
@@ -229,6 +262,23 @@ uv run cli chat start --user-id <id> --agent-id <id>
 # 附带后台兑现消息监听
 uv run cli chat start --user-id <id> --agent-id <id> --watch-reminders
 ```
+
+### E2E 测试
+```bash
+# 单个测试：Moment 兑现链路
+uv run python -m backend.tests.e2e_suite test-delivery
+
+# 单个测试：马拉松备赛 20 轮对话（识别 10+ moment → 确认 → 兑现）
+uv run python -m backend.tests.e2e_suite test-conversation --model deepseek-chat
+
+# 单个测试：全生命周期（15+5 轮对话 → 取消/修改/兑现）
+uv run python -m backend.tests.e2e_suite test-full-lifecycle --model deepseek-chat
+
+# 运行全部测试
+uv run python -m backend.tests.e2e_suite test-all --model deepseek-chat
+```
+
+> 前置条件：后端 FastAPI + moment_worker 均已启动。测试报告自动保存到 `docs/reports/`。
 
 ## 存储模型
 
