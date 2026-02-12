@@ -1,16 +1,17 @@
 """
-测试脚本
-[INPUT]: 依赖 typer 的 Typer/Option，依赖 rich.console 的 Console/Markdown，依赖 cli.client 的 APIClient
+[INPUT]: 依赖 typer 的 Typer/Option，依赖 rich 的 Console/Markdown/Panel/Table，依赖 cli.client 的 APIClient，依赖 commands.agent 的 DEFAULT_MOMENT_DEFINITION，依赖标准库 threading/time/datetime
 [OUTPUT]: 对外提供交互式对话命令（start）与批量对话压测命令（simulate）
-[POS]: cli/commands 的核心对话命令，被 cli/main.py 注册，用于人工对话与关键时刻识别测试
+[POS]: cli/commands 的核心对话命令，被 cli/main.py 注册；start 用于人工对话，simulate 用于多人设 moment 识别测试
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 import typer
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
+import threading
+import time
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -22,6 +23,33 @@ from .agent import DEFAULT_MOMENT_DEFINITION
 
 app = typer.Typer()
 console = Console()
+BJ_TZ = timezone(timedelta(hours=8))
+
+
+def _parse_dt(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        s = s.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(s)
+        except Exception:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _fmt_bj(value: Any) -> str:
+    dt = _parse_dt(value)
+    if not dt:
+        return ""
+    # 仅用于展示：北京时间（UTC+8）
+    return dt.astimezone(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 @app.command("start")
@@ -29,6 +57,11 @@ def start_chat(
     user_id: str = typer.Option(..., "--user-id", "-u", help="用户 ID"),
     agent_id: str = typer.Option(..., "--agent-id", "-a", help="Agent ID"),
     api_url: str = typer.Option("http://localhost:8000", "--api-url", help="API 地址"),
+    watch_reminders: bool = typer.Option(
+        True,
+        "--watch-reminders/--no-watch-reminders",
+        help="是否后台监听新消息（用于到点兑现提醒自动输出）",
+    ),
 ):
     """启动交互式对话
 
@@ -38,6 +71,9 @@ def start_chat(
     输入 'exit' 或 'quit' 退出对话
     """
     client = APIClient(api_url)
+    stop_event = threading.Event()
+    seen_lock = threading.Lock()
+    seen_message_ids: set[str] = set()
 
     try:
         # 创建会话
@@ -46,6 +82,78 @@ def start_chat(
         conv_id = conv["conversation_id"]
         console.print(f"[green]✓[/green] 会话已创建: {conv_id}")
         console.print()
+
+        def _watch_new_messages() -> None:
+            """后台监听会话新消息（用于兑现提醒）。
+
+            备注：
+            - 单独创建 APIClient，避免跨线程复用 httpx.Client
+            - 仅打印 role=assistant 且未展示过的消息（去重基于 message_id）
+            """
+            watcher = APIClient(api_url)
+            try:
+                # 初始化：把现有消息标记为已读，避免一启动就刷屏
+                try:
+                    initial = watcher.get_messages(conv_id, limit=200)
+                except Exception:
+                    initial = []
+                with seen_lock:
+                    for m in initial:
+                        mid = m.get("message_id")
+                        if mid:
+                            seen_message_ids.add(str(mid))
+
+                while not stop_event.is_set():
+                    try:
+                        msgs = watcher.get_messages(conv_id, limit=50)
+                        new_msgs: List[Dict[str, Any]] = []
+                        with seen_lock:
+                            for m in msgs:
+                                if m.get("role") != "assistant":
+                                    continue
+                                mid = m.get("message_id")
+                                if not mid:
+                                    continue
+                                mid_s = str(mid)
+                                if mid_s in seen_message_ids:
+                                    continue
+                                seen_message_ids.add(mid_s)
+                                new_msgs.append(m)
+
+                        # 统一输出（避免一条条刷）
+                        for m in new_msgs:
+                            content = m.get("content") or ""
+                            if not str(content).strip():
+                                continue
+                            bj = _fmt_bj(m.get("created_at"))
+                            title = (
+                                "[bold magenta]Reminder[/bold magenta]"
+                                if not bj
+                                else f"[bold magenta]Reminder（北京时间 {bj}）[/bold magenta]"
+                            )
+                            console.print()
+                            console.print(
+                                Panel(
+                                    Markdown(str(content)),
+                                    title=title,
+                                    border_style="magenta",
+                                )
+                            )
+                            console.print()
+                    except Exception:
+                        # 监听失败不影响主对话：静默退避
+                        pass
+
+                    time.sleep(1.0)
+            finally:
+                watcher.close()
+
+        watcher_thread: Optional[threading.Thread] = None
+        if watch_reminders:
+            watcher_thread = threading.Thread(
+                target=_watch_new_messages, name="chat_message_watcher", daemon=True
+            )
+            watcher_thread.start()
 
         # 交互循环
         console.print("[yellow]开始对话（输入 'exit' 或 'quit' 退出）[/yellow]")
@@ -68,6 +176,12 @@ def start_chat(
                 console.print("[dim]等待回复...[/dim]")
                 response = client.send_message(conv_id, user_input)
 
+                # 去重：主线程打印的 assistant 回复也加入 seen，避免 watcher 重复输出
+                with seen_lock:
+                    mid = response.get("message_id")
+                    if mid:
+                        seen_message_ids.add(str(mid))
+
                 # 展示回复（使用 Markdown 渲染）
                 console.print()
                 console.print(
@@ -88,6 +202,7 @@ def start_chat(
         raise typer.Exit(1)
 
     finally:
+        stop_event.set()
         client.close()
 
 

@@ -73,36 +73,25 @@ async def chat(
         if not conversation:
             raise ResourceNotFoundError(f"会话不存在: {conv_id}")
 
-        # 3. 获取“当前用户所有未完成且未取消的关键时刻（open moments）”，并携带给 LLM
-        open_moments = await moment_service.get_open_moments(conversation.user_id)
-        open_moments_payload = []
-        for m in open_moments:
-            # 只带必要字段，避免上下文膨胀；时间统一 ISO8601 字符串，保证可 JSON 序列化
-            open_moments_payload.append(
-                {
-                    "moment_id": m.moment_id,
-                    "type": m.type,
-                    "event_time": m.event_time.isoformat(),
-                    "remind_time": m.remind_time.isoformat(),
-                    "event_description": m.event_description,
-                    "importance": m.importance,
-                    "suggested_action": m.suggested_action,
-                    "status": m.status,
-                    "confirmed": m.confirmed,
-                }
-            )
+        # 3. get dedup moments (active + recent closed) for LLM injection
+        dedup_moments = await moment_service.get_dedup_moments(
+            conversation.user_id, active_limit=20, recent_days=7,
+        )
 
-        # 4. 调用 LLM 生成回复（同时进行情绪识别和关键时刻判断 + open moments 状态更新）
+        # 4. 调用 LLM 生成回复（同时进行情绪识别和关键时刻判断 + moment 状态更新）
         llm_response = await llm_service.generate_response(
-            conv_id, body.content, open_moments=open_moments_payload
+            conv_id, body.content, open_moments=dedup_moments,
         )
         assistant_content = llm_response["chat_response"]
+        if not isinstance(assistant_content, str) or not assistant_content.strip():
+            # 理论上不会触发：LLMService 内部已做最多 10 次重试并在失败时抛错。
+            raise LLMError("LLM 返回空 chat_response（应已被上游重试拦截）。")
         moment_data = llm_response.get("moment")
         moment_updates = llm_response.get("moment_updates") or []
 
         # 4.1 让 AI 驱动 open moments 的状态变更（失败不影响对话流程）
-        if open_moments_payload and isinstance(moment_updates, list) and moment_updates:
-            allowed_ids = {m["moment_id"] for m in open_moments_payload if "moment_id" in m}
+        if dedup_moments and isinstance(moment_updates, list) and moment_updates:
+            allowed_ids = {m["moment_id"] for m in dedup_moments if "moment_id" in m}
             for upd in moment_updates:
                 if not isinstance(upd, dict):
                     continue

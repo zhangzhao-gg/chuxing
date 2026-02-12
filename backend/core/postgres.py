@@ -98,6 +98,24 @@ async def create_pg_schema() -> None:
         await conn.execute("ALTER TABLE moments ADD COLUMN IF NOT EXISTS suggested_timing TEXT NULL;")
         await conn.execute("ALTER TABLE moments ADD COLUMN IF NOT EXISTS reason TEXT NULL;")
 
+        # ===== 兑现发送（站内消息/短信/推送等）调度字段 =====
+        # 目标：支持多 worker 并发抢占、失败重试、崩溃自动释放锁。
+        await conn.execute(
+            "ALTER TABLE moments ADD COLUMN IF NOT EXISTS deliver_attempts INTEGER NOT NULL DEFAULT 0;"
+        )
+        await conn.execute(
+            "ALTER TABLE moments ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ NULL;"
+        )
+        await conn.execute(
+            "ALTER TABLE moments ADD COLUMN IF NOT EXISTS delivery_locked_at TIMESTAMPTZ NULL;"
+        )
+        await conn.execute(
+            "ALTER TABLE moments ADD COLUMN IF NOT EXISTS delivery_lock_expires_at TIMESTAMPTZ NULL;"
+        )
+        await conn.execute(
+            "ALTER TABLE moments ADD COLUMN IF NOT EXISTS last_delivery_error TEXT NULL;"
+        )
+
         # status 迁移：TEXT -> SMALLINT（pending=1 scheduled=1 completed=2 cancelled=3）
         # 备注：pending 与 scheduled 同为 1，通过 confirmed(false/true) 区分。
         await conn.execute(
@@ -140,6 +158,11 @@ async def create_pg_schema() -> None:
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_moments_user_event_type "
             "ON moments (user_id, event_time, type);"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_moments_delivery_due "
+            "ON moments (remind_time, next_retry_at, delivery_lock_expires_at) "
+            "WHERE status = 1 AND confirmed = TRUE AND executed_at IS NULL;"
         )
 
     logger.info("PostgreSQL 表结构创建完成")

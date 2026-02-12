@@ -115,3 +115,27 @@ class APIClient:
         response = self.client.get("/api/moments", params=params)
         response.raise_for_status()
         return response.json()
+
+    def get_moment(self, moment_id: str) -> Dict[str, Any]:
+        """获取单个关键时刻详情"""
+        response = self.client.get(f"/api/moments/{moment_id}")
+        response.raise_for_status()
+        return response.json()
+
+    def confirm_moment(self, moment_id: str) -> Dict[str, Any]:
+        """确认关键时刻（pending → scheduled）"""
+        response = self.client.post(f"/api/moments/{moment_id}/confirm")
+        response.raise_for_status()
+        return response.json()
+
+    def cancel_moment(self, moment_id: str) -> Dict[str, Any]:
+        """取消关键时刻"""
+        response = self.client.post(f"/api/moments/{moment_id}/cancel")
+        response.raise_for_status()
+        return response.json()
+
+    def create_moment(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """手动创建关键时刻"""
+        response = self.client.post("/api/moments", json=data)
+        response.raise_for_status()
+        return response.json()

@@ -40,6 +40,8 @@ _COLUMNS: Iterable[str] = (
 )
 
 _ALLOWED_SORT_COLUMNS = {"event_time", "created_at", "remind_time"}
+_SELECT_COLUMNS_SQL = ", ".join(_COLUMNS)
+_SELECT_COLUMNS_SQL_M = ", ".join([f"m.{c}" for c in _COLUMNS])
 
 
 class MomentRepository:
@@ -84,7 +86,7 @@ class MomentRepository:
         values = [document.get(col) for col in columns]
         sql = (
             f"INSERT INTO moments ({', '.join(columns)}) "
-            f"VALUES ({placeholders}) RETURNING *"
+            f"VALUES ({placeholders}) RETURNING {_SELECT_COLUMNS_SQL}"
         )
         async with pg.pool.acquire() as conn:
             record = await conn.fetchrow(sql, *values)
@@ -97,7 +99,8 @@ class MomentRepository:
             return None
         async with pg.pool.acquire() as conn:
             record = await conn.fetchrow(
-                "SELECT * FROM moments WHERE moment_id = $1", moment_id
+                f"SELECT {_SELECT_COLUMNS_SQL} FROM moments WHERE moment_id = $1",
+                moment_id,
             )
         return self._to_model(record) if record else None
 
@@ -137,7 +140,7 @@ class MomentRepository:
 
         values.extend([limit, skip])
         sql = (
-            "SELECT * FROM moments"
+            f"SELECT {_SELECT_COLUMNS_SQL} FROM moments"
             f"{where_clause}{order_clause} LIMIT ${len(values) - 1} OFFSET ${len(values)}"
         )
 
@@ -166,7 +169,7 @@ class MomentRepository:
         values.append(moment_id)
         sql = (
             f"UPDATE moments SET {', '.join(set_clauses)} "
-            f"WHERE moment_id = ${len(values)} RETURNING *"
+            f"WHERE moment_id = ${len(values)} RETURNING {_SELECT_COLUMNS_SQL}"
         )
 
         async with pg.pool.acquire() as conn:
@@ -179,13 +182,95 @@ class MomentRepository:
         """查找待触达的关键时刻（用于调度）"""
         async with pg.pool.acquire() as conn:
             records = await conn.fetch(
-                "SELECT * FROM moments "
-                "WHERE remind_time <= $1 AND status = 1 AND confirmed = TRUE "
+                f"SELECT {_SELECT_COLUMNS_SQL} FROM moments "
+                "WHERE remind_time <= $1 "
+                "  AND status = 1 "
+                "  AND confirmed = TRUE "
+                "  AND executed_at IS NULL "
+                "  AND (next_retry_at IS NULL OR next_retry_at <= $1) "
+                "  AND (delivery_lock_expires_at IS NULL OR delivery_lock_expires_at <= $1) "
                 "ORDER BY remind_time ASC LIMIT $2",
                 remind_time_before,
                 limit,
             )
         return [self._to_model(record) for record in records]
+
+    async def claim_due_moments(
+        self,
+        now: datetime,
+        limit: int,
+        lock_expires_at: datetime,
+        max_attempts: int,
+    ) -> List[MomentInDB]:
+        """抢占式领取到期 moments（多 worker 并发安全）。
+
+        设计：
+        - 不引入新的 status 编码，避免 API/模型约束破坏
+        - 通过 delivery_lock_expires_at + SKIP LOCKED 实现“领取锁”
+        - deliver_attempts 递增，用于限制最大重试次数
+        """
+        sql = f"""
+        WITH due AS (
+            SELECT moment_id
+            FROM moments
+            WHERE status = 1
+              AND confirmed = TRUE
+              AND executed_at IS NULL
+              AND remind_time <= $1
+              AND (next_retry_at IS NULL OR next_retry_at <= $1)
+              AND (delivery_lock_expires_at IS NULL OR delivery_lock_expires_at <= $1)
+              AND deliver_attempts < $4
+            ORDER BY remind_time ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT $2
+        )
+        UPDATE moments m
+        SET deliver_attempts = COALESCE(m.deliver_attempts, 0) + 1,
+            delivery_locked_at = $1,
+            delivery_lock_expires_at = $3,
+            updated_at = $1
+        FROM due
+        WHERE m.moment_id = due.moment_id
+        RETURNING {_SELECT_COLUMNS_SQL_M};
+        """
+        async with pg.pool.acquire() as conn:
+            records = await conn.fetch(sql, now, limit, lock_expires_at, max_attempts)
+        return [self._to_model(record) for record in records]
+
+    async def mark_delivered(self, moment_id: str, delivered_at: datetime) -> Optional[MomentInDB]:
+        """标记兑现发送成功：status=2 + executed_at=delivered_at，并清理锁/重试信息。"""
+        sql = (
+            "UPDATE moments SET "
+            "status = 2, executed_at = $2, "
+            "delivery_locked_at = NULL, delivery_lock_expires_at = NULL, "
+            "next_retry_at = NULL, last_delivery_error = NULL, "
+            "updated_at = $2 "
+            "WHERE moment_id = $1 "
+            f"RETURNING {_SELECT_COLUMNS_SQL}"
+        )
+        async with pg.pool.acquire() as conn:
+            record = await conn.fetchrow(sql, moment_id, delivered_at)
+        return self._to_model(record) if record else None
+
+    async def mark_delivery_failed(
+        self,
+        moment_id: str,
+        now: datetime,
+        next_retry_at: datetime,
+        error_message: str,
+    ) -> Optional[MomentInDB]:
+        """标记兑现发送失败：释放锁 + 写入 last_delivery_error/next_retry_at。"""
+        sql = (
+            "UPDATE moments SET "
+            "delivery_locked_at = NULL, delivery_lock_expires_at = NULL, "
+            "last_delivery_error = $2, next_retry_at = $3, "
+            "updated_at = $4 "
+            "WHERE moment_id = $1 "
+            f"RETURNING {_SELECT_COLUMNS_SQL}"
+        )
+        async with pg.pool.acquire() as conn:
+            record = await conn.fetchrow(sql, moment_id, error_message, next_retry_at, now)
+        return self._to_model(record) if record else None
 
     async def find_latest_user_pending_moment(self, user_id: str) -> Optional[MomentInDB]:
         """获取用户最近一个 pending 关键时刻（status=1 且 confirmed=false）。
@@ -196,7 +281,7 @@ class MomentRepository:
         """
         async with pg.pool.acquire() as conn:
             record = await conn.fetchrow(
-                "SELECT * FROM moments "
+                f"SELECT {_SELECT_COLUMNS_SQL} FROM moments "
                 "WHERE user_id = $1 AND status = 1 AND confirmed = FALSE "
                 "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
                 user_id,
@@ -213,10 +298,33 @@ class MomentRepository:
         """
         async with pg.pool.acquire() as conn:
             records = await conn.fetch(
-                "SELECT * FROM moments "
-                "WHERE user_id = $1 AND status <> 2 AND status <> 3 "
-                "ORDER BY updated_at DESC, created_at DESC LIMIT $2",
+                f"SELECT {_SELECT_COLUMNS_SQL} FROM moments "
+                "WHERE user_id = $1 AND status = 1 AND executed_at IS NULL "
+                "ORDER BY event_time ASC LIMIT $2",
                 user_id,
+                limit,
+            )
+        return [self._to_model(record) for record in records]
+
+    async def find_user_recent_closed_moments(
+        self, user_id: str, *, recent_days: int = 7, limit: int = 20
+    ) -> List[MomentInDB]:
+        """获取用户近期已兑现或已取消的关键时刻（用于 LLM 去重：避免刚完成/取消就重复创建）。
+
+        closed 定义：
+        - status=2（completed / 已兑现）
+        - status=3（cancelled / 已取消）
+        仅取最近 recent_days 天内的，按 updated_at 降序。
+        """
+        async with pg.pool.acquire() as conn:
+            records = await conn.fetch(
+                f"SELECT {_SELECT_COLUMNS_SQL} FROM moments "
+                "WHERE user_id = $1 "
+                "  AND (status = 2 OR status = 3) "
+                "  AND updated_at >= NOW() - make_interval(days => $2) "
+                "ORDER BY updated_at DESC LIMIT $3",
+                user_id,
+                recent_days,
                 limit,
             )
         return [self._to_model(record) for record in records]

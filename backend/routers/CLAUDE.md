@@ -29,7 +29,7 @@
 
 **数据流**:
 1. 保存 user message（MessageService.create_message）
-2. 注入“当前用户所有未完成且未取消的关键时刻（open moments）”（status!=2 且 status!=3）
+2. 注入“当前用户 dedup 用 moments”（moment_service.get_dedup_moments()，返回已序列化 Dict 列表，Router 不再手动构建 payload）
 3. 调用 LLMService.generate_response 生成回复（返回 JSON：chat_response/emotion_tags/emotion_level/moment/moment_updates）
 4. 按 moment_updates 更新对应 moment 状态（confirm/cancel/complete；失败不影响对话）
 5. 保存 assistant message
@@ -55,3 +55,4 @@
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+[LAST_UPDATED]: 2026-02-12

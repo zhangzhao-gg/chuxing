@@ -19,11 +19,13 @@
 
 **message.py**: MessageService，消息持久化与查询，create_message 自动计算 token_count（tiktoken），get_conversation_messages 按时间升序返回
 
-**llm.py**: **核心** LLMService，LLM 调用与上下文编排；要求 LLM 返回 JSON（chat_response/emotion_tags/emotion_level/moment/moment_updates），并基于 open_moments 决策去重（重复则 moment=null）；新 moment 需输出 needs_user_confirm（是否需要用户确认）
+**llm.py**: **核心** LLMService，LLM 调用与上下文编排；增强 system prompt **注入当前时间（北京时间+UTC）**，让 LLM 能精确推算相对时间；要求 LLM 返回 JSON（chat_response/emotion_tags/emotion_level/moment/moment_updates）；方法参数名 `open_moments`，提示词注入时使用 `existing_moments` 术语（面向 LLM 更直觉）；系统提示词解释 status_label 语义（pending/scheduled/completed/cancelled），moment_updates 仅可针对 pending/scheduled，去重检查覆盖 ALL 包括 completed/cancelled；moment.time 要求 ISO 8601 **带时区**格式；新 moment 需输出 needs_user_confirm（是否需要用户确认）
 
 **context_compression.py**: ContextCompressionService，上下文压缩服务，compress_messages 通过 OpenAI 生成摘要（失败降级为简单摘要），受 ENABLE_CONTEXT_COMPRESSION 控制
 
-**moment.py**: MomentService，关键时刻创建/手动创建/查询/确认/取消；时间解析使用 dateparser；服务端不做相似度去重，去重由对话时注入的 open_moments 驱动（LLM 重复则 moment=null）；创建新 moment 时 `confirmed` 由 LLM 的 needs_user_confirm 决策（不需要确认→直接进入调度态）
+**moment.py**: MomentService，关键时刻创建/手动创建/查询/确认/取消；**所有 datetime 统一为 timezone-aware UTC**（`_ensure_utc` 规范化：naive→假定北京时间→转 UTC，aware→直接转 UTC）；时间解析三层策略（ISO 8601 优先 → dateparser → 中文相对时间手动解析：**N分钟后/N小时后/半小时后**/下周X/这周X/每周X/明天/后天/N天后/下个月X号）；`_calculate_remind_time` **以 suggested_timing 为决策入口**（`on_time` → remind_time=event_time 精确兑现，`before_event` → advance 减法+max(now)保护）；服务端不做相似度去重，去重由对话时注入的 get_dedup_moments() 驱动（LLM 重复则 moment=null）；get_dedup_moments() 合并活跃 moments（status=1 且 executed_at IS NULL）与近期关闭（7 天内 completed/cancelled），返回 List[Dict] 含 status_label；创建新 moment 时 `confirmed` 由 LLM 的 needs_user_confirm 决策（不需要确认→直接进入调度态）
+
+**notification.py**: NotificationService，兑现发送服务（当前实现：站内 system 消息），被 `backend/moment_worker.py` 消费；未来扩展短信/Push/电话时保持 Service 边界不变
 
 ---
 
@@ -73,4 +75,4 @@
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
-[LAST_UPDATED]: 2026-02-10
+[LAST_UPDATED]: 2026-02-12

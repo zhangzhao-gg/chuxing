@@ -2,10 +2,12 @@
 [INPUT]: 依赖 backend.services.message 的 MessageService，依赖 backend.repositories.agent 的 AgentRepository，依赖 backend.repositories.conversation 的 ConversationRepository，依赖 openai 的 AsyncOpenAI，依赖 backend.core.config 的 settings
 [OUTPUT]: 对外提供 LLMService 类，封装 LLM 调用与上下文管理逻辑（支持携带 open_moments，并返回 moment_updates）
 [POS]: backend/services 的 LLM 核心逻辑层，被 Router 的 /chat 接口消费
+[TIMEZONE]: 增强 system prompt 注入当前时间（北京时间+UTC），moment.time 要求带时区 ISO 8601
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone, timedelta
 import logging
 import json
 import re
@@ -135,8 +137,62 @@ class LLMService:
             
             # 优先尝试强制 JSON；若兼容服务不支持 response_format，再降级重试
             response = await self._call_with_optional_json_response_format(create_params)
-            response_content = response.choices[0].message.content
-            logger.info(f"OpenAI 响应成功: length={len(response_content)}")
+            extracted = self._extract_response(response)
+            response_content = extracted["content"]
+            finish_reason = extracted["finish_reason"]
+            logger.info(
+                "OpenAI 响应: length=%s, finish_reason=%s",
+                len(response_content), finish_reason,
+            )
+
+            # ---- finish_reason 异常检测 ----
+            # content_filter: 内容审核吞掉回复 → 不重试（重试也会被吞），直接告知上层
+            if finish_reason == "content_filter":
+                logger.warning("上游 content_filter 触发，回复被审核拦截")
+                raise LLMError("回复被上游内容审核拦截，请调整对话内容后重试")
+
+            # length: max_tokens 截断 → JSON 可能不完整，加大 token 重试一次
+            if finish_reason == "length":
+                logger.warning(
+                    "finish_reason=length，输出被截断。尝试加大 max_tokens 重试"
+                )
+                retry_params = dict(create_params)
+                retry_params["max_tokens"] = min(
+                    create_params.get("max_tokens", 2048) * 2, 4096
+                )
+                retry_resp = await self._call_with_optional_json_response_format(retry_params)
+                retry_ext = self._extract_response(retry_resp)
+                response_content = retry_ext["content"]
+                finish_reason = retry_ext["finish_reason"]
+                logger.info(
+                    "截断重试响应: length=%s, finish_reason=%s",
+                    len(response_content), finish_reason,
+                )
+
+            def _is_blank(s: Any) -> bool:
+                return (not isinstance(s, str)) or (not s.strip())
+
+            async def _call_parse_normalize(
+                messages_for_call: List[Dict[str, Any]], temperature: float
+            ) -> Dict[str, Any]:
+                params = dict(create_params)
+                params["messages"] = messages_for_call
+                params["temperature"] = temperature
+                resp = await self._call_with_optional_json_response_format(params)
+                ext = self._extract_response(resp)
+                content = ext["content"]
+                logger.info("OpenAI 响应: length=%s, finish_reason=%s", len(content), ext["finish_reason"])
+                parsed_obj = self._try_parse_llm_json(content)
+                if parsed_obj is None:
+                    # 兼容：部分服务返回纯文本；只保证 chat_response 不丢
+                    return {
+                        "chat_response": content,
+                        "emotion_tags": [],
+                        "emotion_level": 0,
+                        "moment": None,
+                        "moment_updates": [],
+                    }
+                return self._normalize_llm_result(parsed_obj)
 
             # 8. 解析 JSON；若失败，自动重试一次（temperature=0.0）避免偶发纯文本
             parsed = self._try_parse_llm_json(response_content)
@@ -150,58 +206,115 @@ class LLMService:
                 retry_response = await self._call_with_optional_json_response_format(
                     retry_params
                 )
-                retry_content = retry_response.choices[0].message.content
+                retry_ext = self._extract_response(retry_response)
+                retry_content = retry_ext["content"]
                 parsed = self._try_parse_llm_json(retry_content)
                 if parsed is None:
                     logger.warning(
                         "LLM重试后仍无法解析JSON，降级返回纯文本。前200字符: %s",
                         retry_content[:200],
                     )
-                    return {
+                    normalized = {
                         "chat_response": retry_content,
                         "emotion_tags": [],
                         "emotion_level": 0,
                         "moment": None,
                         "moment_updates": [],
                     }
+                else:
+                    normalized = self._normalize_llm_result(parsed)
+            else:
+                normalized = self._normalize_llm_result(parsed)
 
-            return self._normalize_llm_result(parsed)
+            # 9. 关键保护：若 chat_response 为空，则最多重试 10 次（重发用户消息给 AI）。
+            max_blank_retries = 10
+            if _is_blank(normalized.get("chat_response")):
+                last = normalized
+                for attempt in range(1, max_blank_retries + 1):
+                    logger.warning(
+                        "LLM 返回空 chat_response，触发重发: conv_id=%s model=%s attempt=%d/%d",
+                        conv_id,
+                        agent.model,
+                        attempt,
+                        max_blank_retries,
+                    )
+                    user_message_retry = (
+                        f"{user_message}\n\n"
+                        "【系统校验】你上一次输出的 chat_response 为空。请重新输出：\n"
+                        "- chat_response 必须为非空中文自然文本\n"
+                        "- 仍需按要求返回完整 JSON（emotion_tags/emotion_level/moment/moment_updates）"
+                    )
+                    retry_messages = self._build_context(
+                        enhanced_system_prompt,
+                        history_messages,
+                        user_message_retry,
+                    )
+                    retry_messages = self._trim_context(
+                        retry_messages, self.max_context_tokens
+                    )
+                    last = await _call_parse_normalize(
+                        retry_messages, temperature=0.0
+                    )
+                    if not _is_blank(last.get("chat_response")):
+                        return last
+
+                # 10 次仍为空：严格失败（禁止兜底文案），让上层返回 502
+                raise OpenAIAPIError(
+                    f"LLM 连续返回空 chat_response（已重试 {max_blank_retries} 次），拒绝兜底。"
+                )
+
+            return normalized
 
         except Exception as e:
             logger.error(f"OpenAI 调用失败: {e}")
             raise OpenAIAPIError(f"OpenAI 调用失败: {e}")
 
     def _build_enhanced_system_prompt(self, original_prompt: str, open_moments_json: str) -> str:
-        """增强系统提示词，要求LLM返回结构化信息（并携带 open_moments 供状态更新/去重）。"""
+        """增强系统提示词：注入当前时间 + existing_moments（含 status_label）+ 结构化输出规范 + 去重/确认规则。"""
+        # 注入精确时间（北京时间 + UTC），让 LLM 能正确推算相对时间
+        now_utc = datetime.now(timezone.utc)
+        bj_tz = timezone(timedelta(hours=8))
+        now_bj = now_utc.astimezone(bj_tz)
+        current_time_str = (
+            f"当前时间：{now_bj.strftime('%Y-%m-%d %H:%M:%S')}（北京时间，即 {now_utc.strftime('%Y-%m-%dT%H:%M:%S')}Z UTC）"
+        )
         return f"""{original_prompt}
 
-你将额外收到“当前用户所有未完成且未取消的关键时刻（open_moments）”，格式为 JSON 数组（可能为空）：
-open_moments = {open_moments_json}
+{current_time_str}
 
-你需要结合用户最新消息，判断它是否对应 open_moments 中的某一个关键时刻，并在返回中给出 moment_updates（可为空数组）。
+你将额外收到"当前用户的关键时刻列表（existing_moments）"，格式为 JSON 数组（可能为空）：
+existing_moments = {open_moments_json}
+
+每个 moment 含有 status_label 字段，语义如下：
+- "pending"：用户尚未确认的关键时刻
+- "scheduled"：已确认，等待到点兑现
+- "completed"：已兑现（最近7天内）
+- "cancelled"：已取消（最近7天内）
+
+moment_updates 仅可操作 status_label 为 "pending" 或 "scheduled" 的条目；对 "completed"/"cancelled" 的条目不要发起更新。
 
 去重规则（必须遵守）：
-- 如果你识别到的关键时刻与 open_moments 中任意一条描述的是同一件事（同一事件/同一情绪/同一习惯），则 **不要** 再创建新的 moment，必须返回 moment=null。
-- 只有当用户明确提出了一个“不同于 open_moments 的新关键时刻”时，才返回 moment 对象用于创建新记录。
+- 如果你识别到的关键时刻与 existing_moments 中任意一条（无论其 status_label）描述的是同一件事（同一事件/同一情绪/同一习惯），则 **不要** 再创建新的 moment，必须返回 moment=null。
+- 只有当用户提出了一个"不在 existing_moments 中的全新关键时刻"时，才返回 moment 对象用于创建新记录。
 
 重要：请以JSON格式返回你的回复，必须包含以下字段：
 1. chat_response: 你的对话回复（自然、有温度的文本）
 2. emotion_tags: 用户当前的情绪标签列表（如：["nervous", "anxious"] 或 ["happy", "excited"]）
 3. emotion_level: 情绪强度（0-5的整数，0=无情绪，5=强烈情绪）
 4. moment: 关键时刻信息（如果用户提到了未来事件、重要情绪或习惯，则填写此字段；否则为null）
-5. moment_updates: 对 open_moments 的状态更新指令数组（如果没有需要更新的关键时刻，则必须返回空数组 []）
+5. moment_updates: 对 existing_moments 中 pending/scheduled 条目的状态更新指令数组（没有则返回空数组 []）
 
 moment字段格式（如果存在）：
 {{
     "is_moment": true,
     "type": "event/habit/emotion",
-    "time": "自然语言时间描述（如：明天早上8点）",
+    "time": "ISO 8601 日期时间（必须带时区，如 2026-02-15T08:00:00+08:00）。根据上方给出的当前时间推算用户话中的相对表达（'一分钟后'→当前时间+1分钟，'下周三'→算出具体日期）。禁止写自然语言。",
     "event_description": "事件描述",
     "emotion": "情绪标签",
     "emotion_level": 0-5或null,
     "importance": "low/mid/high",
     "suggested_action": "call/message",
-    "suggested_timing": "before_event/after_event/on_time",
+    "suggested_timing": "on_time 或 before_event 或 after_event（重要：当用户明确说'提醒我'/'喊我'/'叫我'等要求准时触达的表达时，必须用 on_time；只有'明天有面试'这类需要提前通知的场景才用 before_event）",
     "ai_attitude": "AI的态度（鼓励/安慰/祝贺等）",
     "first_message": "触达时的第一句话（50字以内）",
     "reason": "判断理由",
@@ -209,13 +322,13 @@ moment字段格式（如果存在）：
 }}
 
 needs_user_confirm 规则（必须遵守）：
-- true 表示：你认为需要在对话中让用户明确确认“是否要我提醒/是否要我在某时间触达”，后端会把该 moment 作为 pending（confirmed=false）。
-- false 表示：你认为无需用户确认也能直接调度（例如用户明确说“提醒我/到时候别忘了/请你在X点提醒”等），后端会直接将该 moment 视为 scheduled（confirmed=true）。
+- true：需要用户确认后才进入调度队列（后端设为 pending）
+- false：可直接调度（用户明确说"提醒我"等，后端设为 scheduled）
 
 moment_updates 字段格式（数组，可能为空）：
 [
   {{
-    "moment_id": "要更新的关键时刻ID（必须来自 open_moments）",
+    "moment_id": "要更新的关键时刻ID（必须来自 existing_moments 且 status_label 为 pending/scheduled）",
     "action": "confirm/cancel/complete",
     "reason": "为什么要这样更新（可选，用于审计/调试）"
   }}
@@ -234,6 +347,26 @@ moment_updates 字段格式（数组，可能为空）：
             if v in ("false", "0", "no", "n", "否", "不需要"):
                 return False
         return default
+
+    # ================================================================
+    #  安全响应提取 — 统一处理上游返回的各种异常结构
+    # ================================================================
+
+    def _extract_response(self, response: Any) -> Dict[str, Any]:
+        """从 OpenAI / 兼容 API 返回对象中安全提取 content + finish_reason。
+
+        防护场景：
+        - choices 为空列表 / 属性不存在
+        - message.content 为 None（部分代理/兼容实现常见）
+        - finish_reason 异常值（length / content_filter）
+        """
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            return {"content": "", "finish_reason": None}
+        first = choices[0]
+        content = getattr(getattr(first, "message", None), "content", None) or ""
+        finish_reason = getattr(first, "finish_reason", None)
+        return {"content": content, "finish_reason": finish_reason}
 
     async def _call_with_optional_json_response_format(self, create_params: Dict[str, Any]):
         """调用 OpenAI/兼容服务：优先携带 response_format=json_object；不支持则自动降级。"""
@@ -260,9 +393,11 @@ moment_updates 字段格式（数组，可能为空）：
 
     def _normalize_llm_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """规范化 LLM 的结构化输出，保证下游字段类型稳定。"""
-        chat_response = result.get("chat_response", "")
-        emotion_tags = result.get("emotion_tags", [])
-        emotion_level = result.get("emotion_level", 0)
+        # 关键：LLM 可能返回 chat_response: null，此时 .get() 返回 None 而非默认值
+        # 如果不处理，后续 str(None) → 字面 "None" 送到用户面前
+        chat_response = result.get("chat_response") or ""
+        emotion_tags = result.get("emotion_tags") or []
+        emotion_level = result.get("emotion_level") or 0
         moment = result.get("moment")
         moment_updates = result.get("moment_updates")
 
@@ -296,9 +431,8 @@ moment_updates 字段格式（数组，可能为空）：
                 )
 
         return {
-            "chat_response": chat_response
-            if isinstance(chat_response, str)
-            else str(chat_response),
+            # 非 str 一律置空 → 触发上层空内容重试，而非显示 "None" / "[1,2]"
+            "chat_response": chat_response if isinstance(chat_response, str) else "",
             "emotion_tags": emotion_tags if isinstance(emotion_tags, list) else [],
             "emotion_level": emotion_level if isinstance(emotion_level, int) else 0,
             "moment": moment,

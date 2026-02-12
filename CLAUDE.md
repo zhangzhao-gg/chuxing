@@ -73,7 +73,7 @@ CLI Client → HTTP → Router → Service → Repository → (MongoDB / Postgre
 - **messages**: message_id(unique), conversation_id, role, content, token_count, created_at
 
 ### PostgreSQL Tables（asyncpg）
-- **moments**: 关键时刻主表（`moment_id` 主键，`remind_time/status/confirmed/context_messages(jsonb)` 等字段）
+- **moments**: 关键时刻主表（`moment_id` 主键，`remind_time/status/confirmed/context_messages(jsonb)`，兑现调度字段 `deliver_attempts/next_retry_at/delivery_locked_at/delivery_lock_expires_at/last_delivery_error`）
 
 > 注：代码里仍保留 MongoDB 的 `moments` 索引创建（`backend/core/database.py`），但实际读写 moments 走 PostgreSQL（`backend/repositories/moment.py`）。文档以“实际读写路径”为准。
 
@@ -127,6 +127,8 @@ uv run uvicorn backend.main:app --reload --port 8000
 uv run cli user create --username alice
 uv run cli agent create --name "Python专家" --persona "你是一个精通Python的资深工程师" --model "gpt-4o-mini"
 uv run cli chat start --user-id <user_id> --agent-id <agent_id>
+# 兑现测试：moment test-delivery
+# 全链路 E2E 测试：e2e test-conversation --model deepseek-chat
 ```
 
 ---
@@ -142,4 +144,4 @@ uv run cli chat start --user-id <user_id> --agent-id <agent_id>
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查子模块 CLAUDE.md
-[LAST_UPDATED]: 2026-02-08
+[LAST_UPDATED]: 2026-02-12

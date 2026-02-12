@@ -12,6 +12,8 @@
 ## 成员清单
 
 **main.py**: FastAPI 应用入口，生命周期管理（lifespan），路由注册，日志配置
+**win_entrypoint.py**: Windows 兼容入口点，强制 SelectorEventLoopPolicy 后重新导出 main.app（替代 backend.main:app）
+**moment_worker.py**: 独立 worker 进程入口：轮询领取到期 moments 并发送兑现消息（站内消息），支持并发/抢锁/失败重试（与 Web 解耦）
 
 **core/**: 核心配置与基础设施模块
 - config.py: Pydantic Settings，环境变量加载（MongoDB/PostgreSQL/OpenAI/上下文压缩等）
@@ -32,7 +34,7 @@
 - agent.py: AgentRepository，继承 BaseRepository，实现 _to_model
 - conversation.py: ConversationRepository，继承 BaseRepository，实现 _to_model
 - message.py: MessageRepository，继承 BaseRepository，实现 _to_model
-- moment.py: MomentRepository（**PostgreSQL**），关键时刻 moments 的 CRUD/去重查询（与 BaseRepository 分离）
+- moment.py: MomentRepository（**PostgreSQL**），关键时刻 moments 的 CRUD/去重查询/兑现调度（claim_due_moments/mark_delivered/mark_delivery_failed），与 BaseRepository 分离
 
 **services/**: 业务逻辑层模块
 - user.py: UserService，用户 CRUD，校验用户名唯一性
@@ -41,7 +43,8 @@
 - message.py: MessageService，消息持久化，token 计算（tiktoken）
 - llm.py: **核心** LLMService，上下文拼接 + 滑动窗口裁剪 + OpenAI 调用；要求返回 JSON（chat_response/emotion_tags/emotion_level/moment/moment_updates）
 - context_compression.py: ContextCompressionService，上下文压缩（调用 OpenAI 生成摘要，失败则降级）
-- moment.py: MomentService，关键时刻创建/时间解析（dateparser）/去重/确认/取消
+- moment.py: MomentService，关键时刻创建/时间解析（ISO8601→dateparser→中文相对时间三层策略）/去重/确认/取消
+- notification.py: NotificationService，兑现发送（当前实现：写入站内 system 消息；未来可扩展短信/Push/电话 provider）
 
 **routers/**: API 路由层模块
 - users.py: 用户管理 REST API（POST/GET/DELETE /api/users）
@@ -91,4 +94,4 @@ Repository（数据访问）
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
-[LAST_UPDATED]: 2026-02-10
+[LAST_UPDATED]: 2026-02-12

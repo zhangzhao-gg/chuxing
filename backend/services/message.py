@@ -6,7 +6,7 @@
 """
 
 from typing import List, Dict, Any, Literal
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 import tiktoken
 from ..repositories.message import MessageRepository
@@ -43,7 +43,8 @@ class MessageService:
             "role": role,
             "content": content,
             "token_count": token_count,
-            "created_at": datetime.utcnow(),
+            # 统一使用 timezone-aware UTC，避免时区歧义（展示层再转北京时间）
+            "created_at": datetime.now(timezone.utc),
         }
 
         msg_in_db = await self.repo.create(msg_doc)
