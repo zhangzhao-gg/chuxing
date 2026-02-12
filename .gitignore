@@ -62,7 +62,6 @@ htmlcov/
 .pytest_cache/
 .hypothesis/
 backend/tests/
-docs/reports/
 
 
 # ============================================================

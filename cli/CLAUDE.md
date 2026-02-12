@@ -11,7 +11,7 @@
 
 ## 成员清单
 
-**main.py**: CLI 应用入口，typer.Typer 实例，注册子命令（user/agent/chat/moment/e2e），pyproject.toml 的 [project.scripts] 引用
+**main.py**: CLI 应用入口，typer.Typer 实例，注册子命令（user/agent/chat/moment/e2e/lifecycle），pyproject.toml 的 [project.scripts] 引用
 
 **client.py**: HTTP 客户端封装，APIClient 类，封装与后端 API 的 HTTP 交互（httpx）；强制 `trust_env=False` 避免 localhost 被代理导致 502；提供用户/Agent/会话/消息/moments 全量 API（`create_user/list_users/create_agent/list_agents/create_conversation/send_message/get_messages/list_moments/get_moment/confirm_moment/cancel_moment/create_moment`）
 
@@ -26,6 +26,8 @@
 **commands/moment.py**: 兑现端到端测试命令，moment test-delivery 一键创建 user/agent/conv/moment 并确认，等待 worker 到点写入站内消息后校验 moment completed，生成 Markdown 报告到 docs/reports
 
 **commands/e2e_test.py**: 全链路端到端测试命令，e2e test-conversation 模拟 20 轮自然对话（马拉松备赛主题）→ LLM 自动识别关键时刻 → 确认 pending → 调整 remind_time（直连 PostgreSQL）→ 等 worker 兑现 → 生成 Markdown 报告。内置 502 重试机制
+
+**commands/e2e_full_lifecycle.py**: 全生命周期端到端测试命令，lifecycle test-full-lifecycle 两阶段对话（Phase1: 15 轮多主题触发 12+ moments，Phase2: 5 轮取消/修改对话）→ AI 自动取消 + 手动补充 Cancel/Modify → 确认 pending → 加速 remind_time → worker 兑现 → 生成 Markdown 报告。覆盖 pending→scheduled→completed、pending→cancelled、修改（取消旧+创建新）三条状态迁移链路
 
 ---
 
@@ -60,7 +62,7 @@
 
 **用户体验优先**: 使用 rich 库美化输出，Markdown 渲染 AI 回复，表格展示列表数据
 
-**命令结构清晰**: 子命令分组（user/agent/chat/moment/e2e），参数命名一致（--api-url），帮助文档完整
+**命令结构清晰**: 子命令分组（user/agent/chat/moment/e2e/lifecycle），参数命名一致（--api-url），帮助文档完整
 
 ---
 

@@ -294,8 +294,14 @@ existing_moments = {open_moments_json}
 moment_updates 仅可操作 status_label 为 "pending" 或 "scheduled" 的条目；对 "completed"/"cancelled" 的条目不要发起更新。
 
 去重规则（必须遵守）：
-- 如果你识别到的关键时刻与 existing_moments 中任意一条（无论其 status_label）描述的是同一件事（同一事件/同一情绪/同一习惯），则 **不要** 再创建新的 moment，必须返回 moment=null。
-- 只有当用户提出了一个"不在 existing_moments 中的全新关键时刻"时，才返回 moment 对象用于创建新记录。
+- 如果你识别到的关键时刻与 existing_moments 中任意一条（无论其 status_label）描述的是同一件事（同一事件/同一情绪/同一习惯），且用户没有要求修改该事项，则 **不要** 再创建新的 moment，必须返回 moment=null。
+- 只有当用户提出了一个"不在 existing_moments 中的全新关键时刻"时，或者用户明确要求修改已有关键时刻时，才返回 moment 对象。
+
+修改规则（必须遵守）：
+- 当用户说某件事"改时间了"/"推迟了"/"提前了"/"换地方了"等表示修改已有关键时刻的信息时，你必须同时做两件事：
+  1. 在 moment_updates 中对旧的 moment 发出 cancel 动作（取消旧版本）
+  2. 在 moment 字段中输出一个全新的 moment 对象，包含修改后的信息（新时间/新描述等）
+- 修改 = 取消旧版本 + 创建新版本，缺一不可。绝不能只取消不创建。
 
 重要：请以JSON格式返回你的回复，必须包含以下字段：
 1. chat_response: 你的对话回复（自然、有温度的文本）
