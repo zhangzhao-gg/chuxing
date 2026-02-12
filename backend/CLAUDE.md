@@ -3,20 +3,30 @@
 
 ---
 
+## AGENTS 索引（统一入口）
+
+- [agents.md](../agents.md) - Agent 协作约束与角色清单
+
+---
+
 ## 成员清单
 
 **main.py**: FastAPI 应用入口，生命周期管理（lifespan），路由注册，日志配置
+**win_entrypoint.py**: Windows 兼容入口点，强制 SelectorEventLoopPolicy 后重新导出 main.app（替代 backend.main:app）
+**moment_worker.py**: 独立 worker 进程入口：轮询领取到期 moments 并发送兑现消息（站内消息），支持并发/抢锁/失败重试（与 Web 解耦）
 
 **core/**: 核心配置与基础设施模块
-- config.py: Pydantic Settings，环境变量加载（MONGODB_URL, OPENAI_API_KEY, MAX_CONTEXT_TOKENS, ENABLE_CONTEXT_COMPRESSION）
-- database.py: MongoDB 连接池管理（connect_to_mongo/close_mongo_connection），索引创建
-- exceptions.py: 自定义异常类型（RepositoryError/BusinessError/LLMError），分层异常设计
+- config.py: Pydantic Settings，环境变量加载（MongoDB/PostgreSQL/OpenAI/上下文压缩等）
+- database.py: MongoDB 连接池管理（connect_to_mongo/close_mongo_connection），索引创建（包含 moments 的 Mongo 索引：历史遗留）
+- postgres.py: PostgreSQL 连接池管理（connect_to_postgres/close_postgres_connection），moments 表结构幂等创建
+- exceptions.py: 自定义异常类型（RepositoryError/BusinessError/LLMError/OpenAIAPIError），分层异常设计
 
 **models/**: Pydantic 数据模型模块
 - user.py: UserCreate/UserResponse/UserInDB，用户数据模型
 - agent.py: AgentCreate/AgentResponse/AgentInDB，Agent 数据模型
 - conversation.py: ConversationCreate/ConversationResponse/ConversationInDB，会话数据模型
 - message.py: MessageCreate/MessageResponse/MessageInDB，消息数据模型
+- moment.py: MomentCreate/MomentResponse/MomentInDB，关键时刻数据模型
 
 **repositories/**: 数据访问层模块（MongoDB CRUD）
 - base.py: BaseRepository 抽象类，定义通用 CRUD 方法（create/find_one/find_many/update/delete）
@@ -24,20 +34,26 @@
 - agent.py: AgentRepository，继承 BaseRepository，实现 _to_model
 - conversation.py: ConversationRepository，继承 BaseRepository，实现 _to_model
 - message.py: MessageRepository，继承 BaseRepository，实现 _to_model
+- moment.py: MomentRepository（**PostgreSQL**），关键时刻 moments 的 CRUD/去重查询/兑现调度（claim_due_moments/mark_delivered/mark_delivery_failed），与 BaseRepository 分离
 
 **services/**: 业务逻辑层模块
 - user.py: UserService，用户 CRUD，校验用户名唯一性
 - agent.py: AgentService，Agent CRUD，支持更新配置
 - conversation.py: ConversationService，会话管理，校验 user/agent 存在性
 - message.py: MessageService，消息持久化，token 计算（tiktoken）
-- llm.py: **核心** LLMService，上下文拼接 + 滑动窗口裁剪 + OpenAI 调用，系统价值所在
-- context_compression.py: ContextCompressionService，上下文压缩，节省 65% token 消耗
+- llm.py: **核心** LLMService，上下文拼接 + 滑动窗口裁剪 + OpenAI 调用；要求返回 JSON（chat_response/emotion_tags/emotion_level/moment/moment_updates）
+- context_compression.py: ContextCompressionService，上下文压缩（调用 OpenAI 生成摘要，失败则降级）
+- moment.py: MomentService，关键时刻创建/时间解析（ISO8601→dateparser→中文相对时间三层策略）/去重/确认/取消
+- notification.py: NotificationService，兑现发送（当前实现：写入站内 system 消息；未来可扩展短信/Push/电话 provider）
 
 **routers/**: API 路由层模块
 - users.py: 用户管理 REST API（POST/GET/DELETE /api/users）
 - agents.py: Agent 管理 REST API（POST/GET/PUT/DELETE /api/agents）
 - conversations.py: 会话管理 REST API（POST/GET/DELETE /api/conversations）
-- messages.py: **核心** 对话接口（POST /api/conversations/{conv_id}/chat），数据流汇聚点
+- messages.py: **核心** 对话接口（POST /api/conversations/{conv_id}/chat），数据流汇聚点（包含 moment 识别后的创建）
+- moments.py: 关键时刻管理 API（/api/moments，含 confirm/cancel）
+
+**tests/**: 回归测试（unittest），覆盖对话链路的查重与状态更新行为（不依赖真实 DB/OpenAI）
 
 ---
 
@@ -49,7 +65,7 @@ Router（HTTP 请求/响应）
 Service（业务逻辑）
   ↓ 调用 Repository
 Repository（数据访问）
-  ↓ 操作 MongoDB
+  ↓ 操作 MongoDB / PostgreSQL
 ```
 
 **单向依赖**: 上层依赖下层，下层不知上层，任何反向依赖都是设计错误
@@ -60,7 +76,7 @@ Repository（数据访问）
 
 ### services/llm.py - 系统核心价值
 **职责**: LLM 调用与上下文编排
-**关键方法**: generate_response(conv_id, user_message) → str
+**关键方法**: generate_response(conv_id, user_message, open_moments=None) → Dict（chat_response/emotion/moment/moment_updates）
 **裁剪策略**: 滑动窗口，保留 system_prompt（agent 人格）+ 最新 user（用户意图），删除中间历史
 **上下文压缩**: 当消息数超过阈值时，自动压缩早期消息为摘要（可选功能）
 
@@ -72,10 +88,10 @@ Repository（数据访问）
 
 ### routers/messages.py - 数据流汇聚点
 **职责**: 核心对话接口
-**数据流**: 保存 user message → LLM 生成回复 → 保存 assistant message → 返回响应
-**错误处理**: ResourceNotFoundError → 404，LLMError → 502，Exception → 500
+**数据流**: 保存 user → 注入“用户所有 open moments（未完成且未取消）”→ LLM 返回（chat_response/emotion/moment/moment_updates）→ 按 moment_updates 更新对应 moment 状态 → 保存 assistant → 更新会话时间戳 → 如有 moment 则创建关键时刻 → 返回 assistant
+**错误处理**: ResourceNotFoundError → 404，LLMError → 502，Exception → 500（关键时刻创建失败不影响对话流程）
 
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
-[LAST_UPDATED]: 2026-01-20
+[LAST_UPDATED]: 2026-02-12

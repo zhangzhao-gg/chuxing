@@ -3,6 +3,12 @@
 
 ---
 
+## AGENTS 索引（统一入口）
+
+- [agents.md](../../agents.md) - Agent 协作约束与角色清单
+
+---
+
 ## 成员清单
 
 **user.py**: UserCreate/UserResponse/UserInDB，用户数据模型，username 字段校验（1-50字符）
@@ -12,6 +18,8 @@
 **conversation.py**: ConversationCreate/ConversationResponse/ConversationInDB，会话数据模型，title 可选（最长200字符）
 
 **message.py**: MessageCreate/MessageResponse/MessageInDB，消息数据模型，role 为 Literal["user", "assistant", "system"]，token_count 可选
+
+**moment.py**: MomentCreate/MomentResponse/MomentInDB，关键时刻数据模型（importance/status/type 等枚举字段，context_messages 可选）
 
 ---
 

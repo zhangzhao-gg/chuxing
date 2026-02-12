@@ -8,6 +8,7 @@ from .user import UserCreate, UserResponse, UserInDB
 from .agent import AgentCreate, AgentResponse, AgentInDB
 from .conversation import ConversationCreate, ConversationResponse, ConversationInDB
 from .message import MessageCreate, MessageResponse, MessageInDB
+from .moment import MomentCreate, MomentResponse, MomentInDB
 
 __all__ = [
     "UserCreate",
@@ -22,4 +23,7 @@ __all__ = [
     "MessageCreate",
     "MessageResponse",
     "MessageInDB",
+    "MomentCreate",
+    "MomentResponse",
+    "MomentInDB",
 ]

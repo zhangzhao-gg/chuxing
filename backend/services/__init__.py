@@ -9,6 +9,7 @@ from .agent import AgentService
 from .conversation import ConversationService
 from .message import MessageService
 from .llm import LLMService
+from .moment import MomentService
 
 __all__ = [
     "UserService",
@@ -16,4 +17,5 @@ __all__ = [
     "ConversationService",
     "MessageService",
     "LLMService",
+    "MomentService",
 ]

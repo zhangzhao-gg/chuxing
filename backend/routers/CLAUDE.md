@@ -3,6 +3,12 @@
 
 ---
 
+## AGENTS 索引（统一入口）
+
+- [agents.md](../../agents.md) - Agent 协作约束与角色清单
+
+---
+
 ## 成员清单
 
 **users.py**: 用户管理 REST API，POST 创建用户，GET 列表/详情，DELETE 删除用户，捕获 DuplicateKeyError → 400
@@ -13,6 +19,8 @@
 
 **messages.py**: **核心** 对话接口，POST /api/conversations/{conv_id}/chat 发送消息并获取回复，GET /api/conversations/{conv_id}/messages 获取对话历史
 
+**moments.py**: 关键时刻管理 REST API，POST/GET /api/moments，GET /api/moments/{moment_id}，POST confirm/cancel
+
 ---
 
 ## 核心接口：messages.py
@@ -21,10 +29,13 @@
 
 **数据流**:
 1. 保存 user message（MessageService.create_message）
-2. 调用 LLMService.generate_response 生成回复
-3. 保存 assistant message
-4. 更新会话时间戳（ConversationService.update_conversation_timestamp）
-5. 返回 assistant 回复
+2. 注入“当前用户 dedup 用 moments”（moment_service.get_dedup_moments()，返回已序列化 Dict 列表，Router 不再手动构建 payload）
+3. 调用 LLMService.generate_response 生成回复（返回 JSON：chat_response/emotion_tags/emotion_level/moment/moment_updates）
+4. 按 moment_updates 更新对应 moment 状态（confirm/cancel/complete；失败不影响对话）
+5. 保存 assistant message
+6. 更新会话时间戳（ConversationService.update_conversation_timestamp）
+7. 如果识别到 moment，则创建关键时刻记录（MomentService.create_moment_from_llm_response；失败不影响对话）
+8. 返回 assistant 回复
 
 **错误处理**:
 - ResourceNotFoundError（会话/Agent 不存在）→ 404
@@ -44,3 +55,4 @@
 ---
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+[LAST_UPDATED]: 2026-02-12

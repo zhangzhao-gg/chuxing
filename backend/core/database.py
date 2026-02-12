@@ -78,4 +78,11 @@ async def create_indexes() -> None:
     await db.db.messages.create_index([("conversation_id", 1), ("created_at", 1)])
     logger.info("messages 集合索引创建完成")
 
+    # === moments 集合索引 ===
+    await db.db.moments.create_index("moment_id", unique=True)
+    await db.db.moments.create_index([("user_id", 1), ("event_time", 1)])
+    await db.db.moments.create_index([("remind_time", 1), ("status", 1)])
+    await db.db.moments.create_index([("user_id", 1), ("event_time", 1), ("type", 1)])
+    logger.info("moments 集合索引创建完成")
+
     logger.info("所有索引创建完成")
