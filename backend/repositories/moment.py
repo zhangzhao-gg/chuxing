@@ -216,6 +216,7 @@ class MomentRepository:
             WHERE status = 1
               AND confirmed = TRUE
               AND executed_at IS NULL
+              AND conversation_id IS NOT NULL
               AND remind_time <= $1
               AND (next_retry_at IS NULL OR next_retry_at <= $1)
               AND (delivery_lock_expires_at IS NULL OR delivery_lock_expires_at <= $1)

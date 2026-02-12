@@ -21,7 +21,7 @@
 
 **message.py**: MessageRepository，继承 BaseRepository[MessageInDB]，操作 db.messages 集合，实现 _to_model 转换逻辑
 
-**moment.py**: MomentRepository（PostgreSQL），操作 moments 表；find_user_open_moments 使用 status=1 AND executed_at IS NULL；find_user_recent_closed_moments（N 天内 completed/cancelled 记录，供 LLM dedup 上下文）；find_latest_user_pending_moment/find_pending_moments 等查询；claim_due_moments/mark_delivered/mark_delivery_failed 用于 worker 兑现调度（抢锁+重试）；jsonb 字段做序列化兜底
+**moment.py**: MomentRepository（PostgreSQL），操作 moments 表；find_user_open_moments 使用 status=1 AND executed_at IS NULL；find_user_recent_closed_moments（N 天内 completed/cancelled 记录，供 LLM dedup 上下文）；find_latest_user_pending_moment/find_pending_moments 等查询；claim_due_moments/mark_delivered/mark_delivery_failed 用于 worker 兑现调度（抢锁+重试），claim_due_moments 过滤 `conversation_id IS NOT NULL`（无投递目标的 moment 不领取）；jsonb 字段做序列化兜底
 
 ---
 

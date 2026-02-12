@@ -217,14 +217,23 @@ class MomentService:
     # ================================================================
 
     async def confirm_moment(self, moment_id: str) -> MomentResponse:
-        """确认关键时刻"""
+        """确认关键时刻（进入 scheduled 语义，worker 可领取兑现）。
+
+        前置校验：conversation_id 非空——没有投递目标的 moment 不允许确认，
+        从入口消灭不可兑现的调度，而非在 worker 里反复重试失败。
+        """
+        existing = await self.moment_repo.find_one({"moment_id": moment_id})
+        if not existing:
+            raise ResourceNotFoundError(f"关键时刻不存在: {moment_id}")
+        if not existing.conversation_id:
+            raise ValueError(
+                f"关键时刻 {moment_id} 缺少 conversation_id，无法确认进入调度态"
+            )
         moment = await self.moment_repo.update(
             {"moment_id": moment_id},
             {"confirmed": True, "status": 1, "updated_at": datetime.now(timezone.utc)},
         )
-        if not moment:
-            raise ResourceNotFoundError(f"关键时刻不存在: {moment_id}")
-        return self._to_response(moment)
+        return self._to_response(moment)  # type: ignore[arg-type]
 
     async def cancel_moment(self, moment_id: str) -> MomentResponse:
         """取消关键时刻"""
